@@ -220,6 +220,22 @@ menu "Muse"
         help
             Used when the reply has no CJK. Must return MP3.
 
+    config MUSE_STT_HTTP
+        bool "Recognize push-to-talk via HTTP STT (Azure proxy)"
+        depends on MUSE_HATCH
+        default y if MUSE_BOARD_WAVESHARE_S3_185B
+        default n
+        help
+            On BOOT release, POST the recorded WAV to MUSE_STT_URL (VPS Azure
+            Speech proxy over WireGuard). On success, send the text to Muse
+            like typed input. On failure, fall back to Muse cloud dictation.
+
+    config MUSE_STT_URL
+        string "STT POST URL (WAV in, JSON out)"
+        depends on MUSE_STT_HTTP
+        default "http://10.0.0.1:8788/stt"
+        help
+            Must accept audio/wav and return JSON {"ok":true,"text":"..."}.
 
     config MUSE_SCREEN_OFF_KEEP_LINK
         bool "Keep Wi-Fi and Muse's session up while the screen is off"

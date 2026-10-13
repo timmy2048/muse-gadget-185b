@@ -37,6 +37,7 @@
 #include "muse_settings.h"
 #include "muse_state.h"
 #include "muse_wifi.h"
+#include "muse_stt.h"
 
 static const char *TAG = "muse_voice";
 
@@ -252,9 +253,13 @@ static bool record(bool barge_in, size_t *held, char *why, size_t cap)
     muse_state_set_progress(0);
     s_rec_n = s_sent = 0;
     s_live = s_tried = false;
+#if CONFIG_MUSE_STT_HTTP
+    /* Azure STT path: do not stream to Muse while recording; POST WAV on release. */
+#else
     if (!s_rec || (muse_hatch_ready() && !s_held_count)) {
         go_live();
     }
+#endif
     muse_state_set_caption(s_live ? "LISTENING..." : "RECORDING...");
     bool heard = false, ok = true;
     bool gave_up = false;   /* Hatch failed this note: it's kept, and goes later */
@@ -304,10 +309,12 @@ static bool record(bool barge_in, size_t *held, char *why, size_t cap)
         }
         n += MUSE_AUDIO_CHUNK;
         bool tick = n % (MUSE_AUDIO_CHUNK * 5) == 0;
+#if !CONFIG_MUSE_STT_HTTP
         if (tick && s_rec && !s_live && !gave_up && !s_held_count && muse_hatch_ready()) {
             ESP_LOGI(TAG, "Muse in reach: streaming the note so far");
             go_live();
         }
+#endif
         muse_state_set_progress((float)n / MAX_FRAMES);
         if (!heard && ok && tick) {
             muse_state_set_caption("%s %.1fs", s_live ? "LISTENING" : "RECORDING", (double)n / MUSE_AUDIO_RATE);
@@ -837,6 +844,37 @@ static void run_typed_turn(char *text)
         go_idle("");
     }
 }
+
+#if CONFIG_MUSE_STT_HTTP
+/*
+ * Try Azure STT via VPS; on success send text like typed input.
+ * Returns true if handled (caller must not finish_note).
+ */
+static bool try_azure_stt_turn(void)
+{
+    if (!s_rec || s_rec_n < (size_t)(MUSE_AUDIO_RATE / 5)) {
+        return false;
+    }
+    if (s_live) {
+        muse_hatch_turn_cancel();
+        s_live = false;
+    }
+    muse_state_set_mode(MUSE_MODE_THINKING);
+    muse_state_set_caption("RECOGNIZING...");
+    char *text = muse_stt_recognize_pcm(s_rec, s_rec_n);
+    if (!text) {
+        ESP_LOGW(TAG, "azure stt failed; falling back to Muse dictation");
+        muse_state_set_caption("STT FAIL - MUSE...");
+        return false;
+    }
+    muse_audio_chirp(0);
+    drop_rec();
+    muse_state_set_caption("\"%s\"", text);
+    run_typed_turn(text);   /* frees text */
+    return true;
+}
+#endif
+
 #else
 void muse_voice_send_text(char *text)
 {
@@ -951,6 +989,21 @@ static void voice_task(void *arg)
             go_idle(why);   /* Hatch failed it while recording */
             continue;
         }
+#if CONFIG_MUSE_STT_HTTP && CONFIG_MUSE_HATCH
+        if (try_azure_stt_turn()) {
+            pre_reset();
+            if (muse_state_mode(NULL) != MUSE_MODE_IDLE) {
+                muse_state_make_happy();
+                go_idle("");
+            }
+            continue;
+        }
+        /* STT failed: start a Muse audio turn from the kept note. */
+        if (s_rec && muse_hatch_ready()) {
+            go_live();
+            /* go_live begins a turn; feed buffered PCM via finish_note path */
+        }
+#endif
         pending_down = finish_note();
         pre_reset();
         if (!pending_down && muse_state_mode(NULL) != MUSE_MODE_IDLE) {
