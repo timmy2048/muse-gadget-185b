@@ -37,6 +37,8 @@ bool muse_ui_dark(void);
 void muse_ui_show_face(void);
 /* Slide to the settings tile (used when opening type-to-Muse from face). */
 void muse_ui_show_settings(void);
+/* Slide to the stocks tile (watchlist app). */
+void muse_ui_show_stocks(void);
 /* Settings sub-pages turn off the tile swipe so they can use horizontal gestures. */
 void muse_ui_set_swipe_enabled(bool enabled);
 /* Temporarily applies a brightness while a slider is dragged. */

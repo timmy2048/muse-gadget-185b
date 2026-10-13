@@ -32,6 +32,7 @@
 #include "src/drivers/sdl/lv_sdl_window.h"
 
 #include "muse_state.h"
+#include "muse_stock.h"
 #include "muse_ui.h"
 #include "sim_board.h"
 #include "sim_platform.h"
@@ -40,6 +41,7 @@
 #define FRAME_STEP_MS 5
 
 static volatile sig_atomic_t s_quit;
+static volatile sig_atomic_t s_snapshot_req;
 static bool s_ready;
 static float s_level;
 static float s_progress;
@@ -68,6 +70,9 @@ static void usage(FILE *out, const char *argv0)
             "  ble=off|advertising|connected         passkey=0..999999\n"
             "  paired=true|false  link=boot|unpaired|pairing|confirm|connecting|online|offline|error\n"
             "  speaker=true|false brightness=10..100 advance=MILLISECONDS\n"
+            "  stock=true         stock_sel=0..N\n"
+            "  stock_manage=true  stock_del=N\n"
+            "  stock_add_input=TEXT  stock_add=TEXT\n"
             "\n"
             "Interactive keys: F1..F7 select face states, H is happy, Space is\n"
             "push-to-talk, +/- change level, [/] change progress, S sleeps,\n"
@@ -79,6 +84,13 @@ static void on_signal(int signum)
 {
     (void)signum;
     s_quit = 1;
+}
+
+/* Demo helper: kill -USR1 <pid> writes a screenshot without stopping. */
+static void on_usr1(int signum)
+{
+    (void)signum;
+    s_snapshot_req = 1;
 }
 
 static void render_for(uint32_t duration_ms, bool real_time)
@@ -365,6 +377,66 @@ static bool apply_setting(const char *key, const char *value, bool real_time)
         render_for((uint32_t)number, real_time);
         return true;
     }
+    if (!strcmp(key, "stock") && parse_bool(value, &flag)) {
+        if (flag) {
+            muse_stock_show();
+        }
+        return true;
+    }
+    if (!strcmp(key, "stock_sel") && parse_long(value, -1, 16, &number)) {
+        muse_stock_select((int)number);
+        return true;
+    }
+    if (!strcmp(key, "stock_manage") && parse_bool(value, &flag)) {
+        if (flag) {
+            muse_stock_show();
+            muse_stock_manage();
+        }
+        return true;
+    }
+    if (!strcmp(key, "stock_del") && parse_long(value, 0, 16, &number)) {
+        muse_stock_show();
+        muse_stock_manage();
+        muse_stock_delete((int)number);
+        return true;
+    }
+    if (!strcmp(key, "stock_trading") && parse_bool(value, &flag)) {
+        muse_stock_set_trading_override(flag ? 1 : 0);
+        return true;
+    }
+    if (!strcmp(key, "stock_scroll") && parse_long(value, 0, 16, &number)) {
+        muse_stock_scroll_to((int)number);
+        return true;
+    }
+    if (!strcmp(key, "stock_add_input")) {
+        muse_stock_show();
+        muse_stock_add_begin();
+        for (const char *p = value; *p; p++) {
+            char c = *p;
+            if (c >= 'a' && c <= 'z') {
+                c -= 'a' - 'A';
+            }
+            if ((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.') {
+                muse_stock_text_char(c);
+            }
+        }
+        return true;
+    }
+    if (!strcmp(key, "stock_add")) {
+        muse_stock_show();
+        muse_stock_add_begin();
+        for (const char *p = value; *p; p++) {
+            char c = *p;
+            if (c >= 'a' && c <= 'z') {
+                c -= 'a' - 'A';
+            }
+            if ((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.') {
+                muse_stock_text_char(c);
+            }
+        }
+        muse_stock_text_done();
+        return true;
+    }
     return false;
 }
 
@@ -427,6 +499,27 @@ static int event_watch(void *userdata, SDL_Event *event)
         return 1;
     }
     if (!s_ready || (event->type != SDL_KEYDOWN && event->type != SDL_KEYUP)) {
+        return 1;
+    }
+    /* The stock app's add-symbol view consumes the keyboard (simulates the
+     * board's T9/26-key input method). Esc cancels instead of quitting. */
+    if (muse_stock_text_active()) {
+        if (event->type == SDL_KEYDOWN && !event->key.repeat) {
+            SDL_Keycode key = event->key.keysym.sym;
+            if (key == SDLK_RETURN || key == SDLK_KP_ENTER) {
+                muse_stock_text_done();
+            } else if (key == SDLK_ESCAPE) {
+                muse_stock_text_cancel();
+            } else if (key == SDLK_BACKSPACE) {
+                muse_stock_text_backspace();
+            } else if (key >= SDLK_a && key <= SDLK_z) {
+                muse_stock_text_char((char)('A' + (key - SDLK_a)));
+            } else if (key >= SDLK_0 && key <= SDLK_9) {
+                muse_stock_text_char((char)('0' + (key - SDLK_0)));
+            } else if (key == SDLK_PERIOD) {
+                muse_stock_text_char('.');
+            }
+        }
         return 1;
     }
     bool down = event->type == SDL_KEYDOWN;
@@ -503,6 +596,7 @@ int main(int argc, char **argv)
     }
     signal(SIGINT, on_signal);
     signal(SIGTERM, on_signal);
+    signal(SIGUSR1, on_usr1);
 
     sim_time_reset();
     sim_services_reset();
@@ -530,8 +624,16 @@ int main(int argc, char **argv)
             return 1;
         }
     } else {
+        const char *shot = getenv("MUSE_SIM_SHOT");
+        if (!shot || !*shot) {
+            shot = "sim-shot.ppm";
+        }
         while (!s_quit) {
             render_for(FRAME_STEP_MS, true);
+            if (s_snapshot_req) {
+                s_snapshot_req = 0;
+                write_snapshot(shot);
+            }
         }
     }
 
