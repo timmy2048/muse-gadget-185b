@@ -19,6 +19,7 @@
 
 #include "esp_log.h"
 #include "muse_ui.h"
+#include "muse_keypad.h"
 
 #ifdef ESP_PLATFORM
 #include "esp_http_client.h"
@@ -85,6 +86,7 @@ static int s_w, s_h;
 /* Add-view text entry. */
 static char s_input[STOCK_SYMBOL_LEN];
 static lv_obj_t *s_input_lbl;
+static lv_obj_t *s_input_ta; /* device textarea for the ADD view */
 
 /* ------------------------------------------------------------------ */
 /* Watchlist persistence: NVS with a simulator file stand-in.          */
@@ -741,6 +743,26 @@ static void build_add(void)
     lv_obj_set_style_text_letter_space(title, 2, 0);
     lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 26);
 
+#ifdef ESP_PLATFORM
+    /* Device: system textarea + touch keypad (T9/pinyin/abc). */
+    s_input_ta = lv_textarea_create(s_root);
+    lv_textarea_set_one_line(s_input_ta, true);
+    lv_textarea_set_max_length(s_input_ta, STOCK_SYMBOL_LEN - 1);
+    lv_obj_set_size(s_input_ta, s_w - 96, 56);
+    lv_obj_set_style_text_font(s_input_ta, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_color(s_input_ta, lv_color_hex(COLOR_TEXT), 0);
+    lv_obj_set_style_bg_color(s_input_ta, lv_color_hex(COLOR_BG), 0);
+    lv_obj_set_style_bg_opa(s_input_ta, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_color(s_input_ta, lv_color_hex(COLOR_ACCENT), 0);
+    lv_obj_set_style_border_width(s_input_ta, 2, 0);
+    lv_obj_set_style_radius(s_input_ta, 12, 0);
+    lv_obj_align(s_input_ta, LV_ALIGN_TOP_MID, 0, 58);
+    lv_obj_add_state(s_input_ta, LV_STATE_FOCUSED);
+
+    lv_obj_t *kp = muse_keypad_create(s_root, s_input_ta, true);
+    muse_keypad_layout(kp, 130, s_w, s_h - 130);
+    muse_keypad_reset(kp, false);
+#else
     lv_obj_t *box = lv_obj_create(s_root);
     lv_obj_remove_style_all(box);
     lv_obj_set_size(box, s_w - 96, 64);
@@ -757,6 +779,7 @@ static void build_add(void)
     lv_obj_t *hint = label(s_root, &lv_font_unscii_8, COLOR_DIM, "Type A-Z 0-9");
     lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_align(hint, LV_ALIGN_CENTER, 0, 36);
+#endif
 
     /* On-screen confirm/cancel for the touch panel (keyboard Enter/Esc
      * also work in the simulator). */
@@ -766,7 +789,7 @@ static void build_add(void)
     lv_obj_set_flex_flow(bar, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(bar, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_style_pad_column(bar, 12, 0);
-    lv_obj_align(bar, LV_ALIGN_BOTTOM_MID, 0, -44);
+    lv_obj_align(bar, LV_ALIGN_BOTTOM_MID, 0, -16);
     lv_obj_t *ok = pill_button(bar, "Add", COLOR_ACCENT);
     lv_obj_add_event_cb(ok, on_add_confirm_btn, LV_EVENT_CLICKED, NULL);
     lv_obj_t *cancel = pill_button(bar, "Cancel", COLOR_DIM);
@@ -778,6 +801,7 @@ static void show_view(stock_view_t v)
     s_view = v;
     lv_obj_clean(s_root);
     s_input_lbl = NULL;
+    s_input_ta = NULL;
     switch (v) {
     case SV_MANAGE:
         build_manage();
@@ -932,6 +956,17 @@ void muse_stock_text_backspace(void)
 
 void muse_stock_text_done(void)
 {
+#ifdef ESP_PLATFORM
+    /* Device: read from the system textarea. */
+    if (s_input_ta) {
+        const char *t = lv_textarea_get_text(s_input_ta);
+        if (t) {
+            normalize_symbol(s_input, t);
+        } else {
+            s_input[0] = '\0';
+        }
+    }
+#endif
     if (add_symbol(s_input)) {
         show_view(SV_MANAGE);
     } else {
