@@ -1,6 +1,6 @@
 /*
  * Stock watchlist app (preview). See muse_stock.h for the data-source contract:
- * NVS > remote watchlist.json > built-in default; in-app manager; DEMO quotes.
+ * NVS > remote watchlist.json > built-in default; in-app manager; Yahoo Finance real quotes.
  *
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  * Licensed under the Apache License, Version 2.0.
@@ -52,10 +52,10 @@ static const char *const s_default_watchlist[] = { "META", "SPCX" };
 
 typedef struct {
     char symbol[STOCK_SYMBOL_LEN];
-    double price;      /* DEMO */
-    double change_pct; /* DEMO */
-    double open;       /* DEMO */
-    double prev_close; /* DEMO */
+    double price;      /* Yahoo Finance */
+    double change_pct; /* Yahoo Finance */
+    double open;       /* Yahoo Finance */
+    double prev_close; /* Yahoo Finance */
 } stock_quote_t;
 
 typedef enum {
@@ -265,7 +265,7 @@ static void watchlist_to_json(char symbols[][STOCK_SYMBOL_LEN], int n, char *out
     snprintf(out + len, cap - len, "]");
 }
 
-/* DEMO quotes. Real feed plugs in here later. */
+/* DEMO quotes (simulator only). Real feed: Yahoo Finance, see below. */
 static void demo_quote(const char *symbol, stock_quote_t *q)
 {
     snprintf(q->symbol, sizeof(q->symbol), "%.*s",
@@ -291,6 +291,87 @@ static void demo_quote(const char *symbol, stock_quote_t *q)
         q->open = q->price / (1.0 + q->change_pct / 100.0);
         q->prev_close = q->open;
     }
+}
+
+#ifdef ESP_PLATFORM
+/* ------------------------------------------------------------------ */
+/* Yahoo Finance real quotes (device only).                            */
+/* GET https://query1.finance.yahoo.com/v8/finance/chart/<SYM>          */
+/* Parse "regularMarketPrice" and "chartPreviousClose" from the JSON.   */
+/* ------------------------------------------------------------------ */
+
+#define YAHOO_URL_FMT \
+    "https://query1.finance.yahoo.com/v8/finance/chart/%s?interval=1d&range=5d"
+
+static double json_num_after(const char *json, const char *key)
+{
+    const char *p = strstr(json, key);
+    if (!p) {
+        return 0.0 / 0.0; /* NaN */
+    }
+    p += strlen(key);
+    while (*p == ' ' || *p == ':') {
+        p++;
+    }
+    return strtod(p, NULL);
+}
+
+static int yahoo_quote(const char *symbol, stock_quote_t *q)
+{
+    char url[128];
+    snprintf(url, sizeof(url), YAHOO_URL_FMT, symbol);
+
+    esp_http_client_config_t cfg = {
+        .url = url,
+        .timeout_ms = 10000,
+    };
+    esp_http_client_handle_t client = esp_http_client_init(&cfg);
+    if (!client) {
+        return -1;
+    }
+    /* Yahoo chart JSON for one symbol is ~2-4 KB; 8 KB is plenty. */
+    static char buf[8192];
+    size_t len = 0;
+    int rc = -1;
+    if (esp_http_client_open(client, 0) == ESP_OK &&
+        esp_http_client_fetch_headers(client) >= 0) {
+        int n;
+        while (len + 1 < sizeof(buf) &&
+               (n = esp_http_client_read(client, buf + len,
+                                         sizeof(buf) - 1 - len)) > 0) {
+            len += (size_t)n;
+        }
+        if (len > 0) {
+            buf[len] = '\0';
+            double price = json_num_after(buf, "\"regularMarketPrice\"");
+            double prev = json_num_after(buf, "\"chartPreviousClose\"");
+            if (price == price && prev == prev && prev > 0) { /* not NaN */
+                snprintf(q->symbol, sizeof(q->symbol), "%.*s",
+                         (int)(sizeof(q->symbol) - 1), symbol);
+                q->price = price;
+                q->prev_close = prev;
+                q->change_pct = (price - prev) / prev * 100.0;
+                q->open = prev; /* approx; chart API meta has no open here */
+                rc = 0;
+            }
+        }
+    }
+    esp_http_client_close(client);
+    esp_http_client_cleanup(client);
+    return rc;
+}
+#endif
+
+/* Fill a quote: device tries Yahoo Finance first, falls back to demo
+ * values so the UI never shows blanks on network failure. */
+static void quote_for_symbol(const char *symbol, stock_quote_t *q)
+{
+#ifdef ESP_PLATFORM
+    if (yahoo_quote(symbol, q) == 0) {
+        return;
+    }
+#endif
+    demo_quote(symbol, q);
 }
 
 static uint32_t fnv1a(const char *s, size_t len)
@@ -355,7 +436,7 @@ static void load_watchlist(void)
 
     s_count = n;
     for (int i = 0; i < n; i++) {
-        demo_quote(symbols[i], &s_quotes[i]);
+        quote_for_symbol(symbols[i], &s_quotes[i]);
     }
     if (s_selected >= s_count) {
         s_selected = -1;
@@ -410,7 +491,7 @@ static bool remote_watchlist_check(void)
     ESP_LOGI(TAG, "remote watchlist changed: %d -> %d symbols, updating live", s_count, n);
     s_count = n;
     for (int i = 0; i < n; i++) {
-        demo_quote(symbols[i], &s_quotes[i]);
+        quote_for_symbol(symbols[i], &s_quotes[i]);
     }
     if (s_selected >= s_count) {
         s_selected = -1;
@@ -510,7 +591,7 @@ static bool add_symbol(const char *raw)
         return false;
     }
     ESP_LOGI(TAG, "add %s", sym);
-    demo_quote(sym, &s_quotes[s_count++]);
+    quote_for_symbol(sym, &s_quotes[s_count++]);
     s_src_name = "nvs";
     persist_watchlist();
     return true;
@@ -606,16 +687,6 @@ static void build_quotes(void)
     lv_obj_set_flex_align(sub, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_style_pad_column(sub, 8, 0);
     lv_obj_align(sub, LV_ALIGN_TOP_MID, 0, 54);
-    lv_obj_t *badge = lv_obj_create(sub);
-    lv_obj_remove_style_all(badge);
-    lv_obj_set_size(badge, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
-    lv_obj_set_style_bg_color(badge, lv_color_hex(COLOR_DEMO), 0);
-    lv_obj_set_style_bg_opa(badge, LV_OPA_30, 0);
-    lv_obj_set_style_radius(badge, 8, 0);
-    lv_obj_set_style_pad_hor(badge, 8, 0);
-    lv_obj_set_style_pad_ver(badge, 3, 0);
-    lv_obj_t *bt = label(badge, &lv_font_unscii_8, COLOR_DEMO, "DEMO");
-    lv_obj_center(bt);
     snprintf(buf, sizeof(buf), "watchlist: %s", s_src_name);
     label(sub, &lv_font_unscii_8, COLOR_DIM, buf);
 
