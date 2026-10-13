@@ -57,7 +57,7 @@ description: >-
 1. **上行**：按住 BOOT 录音 → 云端转写。
 2. **长回复**：订阅 NDJSON 行缓冲要够大。
 3. **下行 TTS**：Speaker On 时拉 HTTP MP3；固件 URL：`http://10.0.0.1:8787/tts?q=`。
-4. **台妹腔**：VPS `/opt/muse-tts` 调 Azure Speech（env 权限 600）；音色如 `zh-TW-HsiaoChenNeural`。只重启 `muse-tts-proxy`，**勿动 x-ui**。
+4. **晓晓 friendly**：VPS `/opt/muse-tts` 调 Azure Speech（env 权限 600）；默认 `zh-CN-XiaoxiaoNeural` + `style=friendly`。只重启 `muse-tts-proxy`，**勿动 x-ui**。换音色无需刷固件。
 5. **CJK** 字体配置打开。
 
 ## 7. OTA 远程升级（GitHub Releases，公开仓）

@@ -80,7 +80,7 @@ Chat/`device.ota` invoke still works; menu path is preferred.
 
 ## TTS
 
-Board calls `http://10.0.0.1:8787/tts` over WireGuard (VPS proxy → Azure Speech). Azure keys live only on the VPS (`muse-tts.env`), **not** in this repo.
+Board calls `http://10.0.0.1:8787/tts` over WireGuard (VPS proxy → Azure Speech). Default voice **`zh-CN-XiaoxiaoNeural`** with **`style=friendly`** (set in VPS `muse-tts.env`; see `tools/tts_wg_proxy.py`). Azure keys live only on the VPS, **not** in this repo. Changing voice/style needs VPS restart only — no board flash.
 
 ## Do not commit
 
