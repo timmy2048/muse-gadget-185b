@@ -20,7 +20,8 @@
 #include "src/drivers/sdl/lv_sdl_mouse.h"
 #include "src/drivers/sdl/lv_sdl_window.h"
 
-#define WATCHER_RESOLUTION 412
+/* Preview build: emulate the Waveshare ESP32-S3-Touch-LCD-1.85B panel. */
+#define PREVIEW_RESOLUTION 360
 
 static lv_display_t *s_display;
 
@@ -34,7 +35,7 @@ static esp_err_t sim_init(void)
 
 static lv_display_t *sim_display_start(lv_indev_t **touch)
 {
-    s_display = lv_sdl_window_create(WATCHER_RESOLUTION, WATCHER_RESOLUTION);
+    s_display = lv_sdl_window_create(PREVIEW_RESOLUTION, PREVIEW_RESOLUTION);
     if (!s_display) {
         return NULL;
     }
@@ -75,9 +76,9 @@ static esp_err_t sim_power_off(void)
 }
 
 static const muse_board_t s_sim_board = {
-    .name = "SenseCAP Watcher Simulator",
-    .width = WATCHER_RESOLUTION,
-    .height = WATCHER_RESOLUTION,
+    .name = "Waveshare 1.85B Preview",
+    .width = PREVIEW_RESOLUTION,
+    .height = PREVIEW_RESOLUTION,
     .round = true,
     .touch = true,
     .diagonal_in = 1.45f,

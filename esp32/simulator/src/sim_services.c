@@ -204,6 +204,11 @@ bool muse_settings_ui_in_subpage(void)
     return false;
 }
 
+/* Type-to-Muse entry; not wired in the simulator preview. */
+void muse_settings_ui_open_type(void)
+{
+}
+
 void muse_menu_key(muse_menu_key_t key)
 {
     (void)key;
