@@ -1,247 +1,579 @@
-/* Auto-generated compact pinyin dict (simplified Chinese). */
+
 #include "muse_pinyin.h"
 #include <string.h>
 
 typedef struct { const char *py; const char *cands; } muse_py_entry_t;
 
-/* Exact multi-char words (matched by full or prefix of remaining buffer). */
 static const muse_py_entry_t s_words[] = {
     { "agu", "A股" },
     { "aihao", "爱好" },
+    { "anpai", "安排" },
     { "anquan", "安全" },
     { "baifenbi", "百分比" },
     { "banben", "版本" },
     { "bangding", "绑定" },
+    { "bangong", "办公" },
     { "bangzhu", "帮助" },
     { "baocun", "保存" },
     { "baojing", "报警" },
     { "baoqian", "抱歉" },
     { "baoyang", "保养" },
+    { "baozheng", "保证" },
     { "beijing", "北京" },
+    { "benneng", "本能" },
+    { "biaoqing", "表情" },
+    { "biaoti", "标题" },
+    { "biaoxian", "表现" },
+    { "biekeqi", "别客气" },
     { "bingqie", "并且" },
     { "bixu", "必须" },
     { "budui", "不对" },
     { "buhaoyisi", "不好意思" },
+    { "bukan", "不看" },
+    { "buke", "不可" },
     { "buneng", "不能" },
+    { "buyao", "不要" },
+    { "buyong", "不用" },
     { "caidan", "菜单" },
+    { "caozuo", "操作" },
+    { "ceshi", "测试" },
     { "chaosong", "抄送" },
+    { "chaoxi", "抄袭" },
     { "chenggong", "成功" },
     { "chengjiao", "成交" },
+    { "chengshi", "城市" },
     { "chifan", "吃饭" },
+    { "chihu", "吃苦" },
     { "chongdian", "充电" },
+    { "chongfu", "重复" },
     { "chongqi", "重启" },
+    { "chuanqi", "传奇" },
+    { "chuxian", "出现" },
+    { "cishu", "次数" },
+    { "cuicu", "催促" },
     { "cuowu", "错误" },
+    { "daan", "答案" },
+    { "dabian", "答辩" },
+    { "dabiao", "达标" },
+    { "daguimo", "大规模" },
+    { "daihao", "代号" },
+    { "daikuan", "贷款" },
     { "daima", "代码" },
     { "dakai", "打开" },
     { "danshi", "但是" },
+    { "danxin", "担心" },
+    { "daoqian", "道歉" },
     { "dazi", "打字" },
+    { "dengdai", "等待" },
     { "dengdeng", "等等" },
+    { "denghou", "等候" },
     { "denglu", "登录" },
     { "dianchi", "电池" },
     { "dianhua", "电话" },
+    { "dianji", "点击" },
     { "dianliang", "电量" },
     { "diannao", "电脑" },
     { "dianya", "电压" },
     { "dianying", "电影" },
     { "dianzan", "点赞" },
     { "diefu", "跌幅" },
+    { "dingyue", "订阅" },
+    { "dongxi", "东西" },
     { "duankai", "断开" },
+    { "duanxin", "短信" },
+    { "duibi", "对比" },
     { "duibuqi", "对不起" },
+    { "duihua", "对话" },
+    { "duihuakuang", "对话框" },
+    { "duoyu", "多余" },
+    { "duoyuan", "多元" },
     { "erqie", "而且" },
-    { "fangdian", "放电" },
+    { "fabu", "发布" },
+    { "facai", "发财" },
+    { "fangfa", "方法" },
+    { "fangjia", "放假" },
+    { "fangjian", "房间" },
+    { "fangwen", "访问" },
+    { "fangxin", "放心" },
     { "fanhui", "返回" },
+    { "fanxiang", "反向" },
+    { "fanyi", "翻译" },
     { "fayan", "发言" },
+    { "fazhan", "发展" },
+    { "feichang", "非常" },
+    { "feiji", "飞机" },
+    { "fenbian", "分辨" },
+    { "fengxian", "风险" },
     { "fensi", "粉丝" },
     { "fenxiang", "分享" },
     { "fenzhong", "分钟" },
     { "fumu", "父母" },
+    { "fuqian", "付钱" },
+    { "fuwu", "服务" },
+    { "fuwuqi", "服务器" },
+    { "fuzhuang", "服装" },
+    { "gaibian", "改变" },
+    { "gaijin", "改进" },
     { "gangbi", "港币" },
     { "ganjin", "赶紧" },
+    { "ganjue", "感觉" },
     { "ganxie", "感谢" },
+    { "gaodu", "高度" },
+    { "gaosu", "告诉" },
+    { "gaoxiao", "高效" },
+    { "gaoxing", "高兴" },
+    { "geiwo", "给我" },
     { "gengxin", "更新" },
+    { "genju", "根据" },
+    { "gongkai", "公开" },
+    { "gongneng", "功能" },
+    { "gongping", "公平" },
+    { "gongsi", "公司" },
+    { "gongxi", "恭喜" },
     { "gongzuo", "工作" },
+    { "goumai", "购买" },
     { "guanbi", "关闭" },
     { "guangzhou", "广州" },
+    { "guanli", "管理" },
+    { "guanyu", "关于" },
     { "guanzhu", "关注" },
+    { "guihai", "规划" },
+    { "guihua", "规划" },
+    { "guoji", "国际" },
+    { "guoqing", "国情" },
     { "gupiao", "股票" },
     { "gupiaoda", "股票代码" },
     { "gushi", "故事" },
     { "guzhang", "故障" },
     { "haipa", "害怕" },
     { "haishi", "还是" },
+    { "haitao", "海涛" },
     { "haizi", "孩子" },
+    { "hangqing", "行情" },
     { "haode", "好的" },
-    { "haoode", "好的" },
+    { "haokan", "好看" },
+    { "haowan", "好玩" },
+    { "haoxiang", "好像" },
     { "heshui", "喝水" },
-    { "huanshou", "换手" },
+    { "hexie", "和谐" },
+    { "hezuo", "合作" },
+    { "hongbao", "红包" },
+    { "hongse", "红色" },
+    { "houlai", "后来" },
+    { "houmian", "后面" },
+    { "huanxin", "欢心" },
+    { "huanye", "换页" },
+    { "huanying", "欢迎" },
     { "huida", "回答" },
+    { "huidao", "回到" },
     { "huifu", "回复" },
+    { "huisuo", "会所" },
+    { "huitou", "回头" },
+    { "hunyin", "婚姻" },
+    { "huoche", "火车" },
     { "huozhe", "或者" },
+    { "huzhao", "护照" },
     { "jiage", "价格" },
+    { "jiagebiao", "价格表" },
+    { "jiahua", "假话" },
     { "jiancha", "检查" },
+    { "jiandan", "简单" },
+    { "jiandanhao", "简单好" },
+    { "jianghua", "讲话" },
+    { "jianshe", "建设" },
+    { "jiaotong", "交通" },
+    { "jiaoyu", "教育" },
     { "jiating", "家庭" },
+    { "jiben", "基本" },
     { "jiebang", "解绑" },
+    { "jiehuan", "借还" },
+    { "jieshao", "介绍" },
+    { "jiesheng", "节省" },
+    { "jieshi", "解释" },
     { "jieshu", "结束" },
+    { "jiezhe", "接着" },
     { "jijin", "基金" },
+    { "jilu", "记录" },
+    { "jinbu", "进步" },
     { "jindu", "进度" },
+    { "jingcai", "精彩" },
+    { "jingli", "经理" },
+    { "jingqing", "敬请" },
     { "jingya", "惊讶" },
     { "jingyin", "静音" },
+    { "jingzheng", "竞争" },
+    { "jinqian", "金钱" },
     { "jintian", "今天" },
+    { "jinzhang", "紧张" },
     { "jiqiren", "机器人" },
+    { "jiuwei", "就位" },
     { "jixu", "继续" },
+    { "jizhu", "记住" },
+    { "juece", "决策" },
+    { "juede", "觉得" },
+    { "kafei", "咖啡" },
+    { "kafeiui", "咖啡" },
+    { "kaifang", "开放" },
+    { "kaiguan", "开关" },
     { "kaishi", "开始" },
     { "kaixin", "开心" },
+    { "kanfa", "看法" },
+    { "kanjian", "看见" },
+    { "kaobei", "拷贝" },
+    { "keai", "可爱" },
+    { "kebushi", "可不是" },
+    { "kefu", "客服" },
+    { "keguan", "客观" },
+    { "kehu", "客户" },
     { "keneng", "可能" },
     { "keyi", "可以" },
+    { "kongjian", "空间" },
+    { "kongzhi", "控制" },
+    { "kuaidi", "快递" },
     { "kuaidian", "快点" },
+    { "kuaijie", "快捷" },
+    { "kuaile", "快乐" },
     { "kuisun", "亏损" },
+    { "laiwang", "来往" },
+    { "laixin", "来信" },
+    { "laodong", "劳动" },
     { "laoshi", "老师" },
+    { "lianai", "恋爱" },
     { "liangdu", "亮度" },
+    { "lianghao", "良好" },
     { "lianjie", "连接" },
+    { "lianxi", "联系" },
+    { "liaotian", "聊天" },
+    { "lingchen", "凌晨" },
+    { "lingdao", "领导" },
+    { "linghuo", "灵活" },
+    { "liulan", "浏览" },
+    { "liwu", "礼物" },
     { "lixian", "离线" },
+    { "lvyou", "旅游" },
+    { "mafan", "麻烦" },
     { "maichu", "卖出" },
     { "mairu", "买入" },
     { "manman", "慢慢" },
+    { "maoyi", "贸易" },
     { "mashang", "马上" },
     { "meigu", "美股" },
     { "meiguanxi", "没关系" },
     { "meiguo", "美国" },
+    { "meili", "美丽" },
     { "meishi", "没事" },
+    { "meitian", "每天" },
+    { "meiyou", "没有" },
     { "meiyuan", "美元" },
+    { "mianfei", "免费" },
+    { "mianji", "面积" },
     { "mima", "密码" },
+    { "mingbai", "明白" },
     { "mingtian", "明天" },
+    { "minzu", "民族" },
+    { "moshi", "模式" },
+    { "mubiao", "目标" },
+    { "mudi", "目的" },
     { "muse", "缪斯" },
     { "nali", "哪里" },
+    { "name", "那么" },
     { "nanguo", "难过" },
     { "nanpengyou", "男朋友" },
+    { "neirong", "内容" },
+    { "nengfou", "能否" },
+    { "nengli", "能力" },
+    { "nianling", "年龄" },
     { "nihao", "你好" },
+    { "nimen", "你们" },
+    { "ninhao", "您好" },
+    { "nuli", "努力" },
     { "nvpengyou", "女朋友" },
     { "ouyuan", "欧元" },
     { "ouzhou", "欧洲" },
+    { "paihang", "排行" },
+    { "paiqi", "排气" },
+    { "paizhao", "拍照" },
+    { "peihe", "配合" },
+    { "peizhi", "配置" },
     { "pengyou", "朋友" },
+    { "pianyi", "便宜" },
+    { "piaozi", "票子" },
+    { "pingheng", "平衡" },
+    { "pingjia", "评价" },
     { "pinglun", "评论" },
     { "pingmu", "屏幕" },
+    { "pingtai", "平台" },
+    { "pinyin", "拼音" },
+    { "putong", "普通" },
+    { "qianbao", "钱包" },
+    { "qiandai", "钱袋" },
+    { "qianjin", "前进" },
+    { "qianmian", "前面" },
+    { "qianqi", "前期" },
     { "qichuang", "起床" },
     { "qidong", "启动" },
+    { "qingchu", "清除" },
+    { "qingchuhao", "清楚" },
+    { "qingjia", "请假" },
+    { "qingkong", "清空" },
     { "qinglang", "晴朗" },
+    { "qingnian", "青年" },
     { "qingqiu", "请求" },
     { "qingwen", "请问" },
+    { "qingzhu", "庆祝" },
+    { "qita", "其他" },
     { "qizi", "妻子" },
+    { "quanbu", "全部" },
+    { "qubie", "区别" },
+    { "qudao", "渠道" },
+    { "queding", "确定" },
     { "queren", "确认" },
     { "quxiao", "取消" },
     { "ranhou", "然后" },
     { "redian", "热点" },
     { "remen", "热门" },
     { "renminbi", "人民币" },
+    { "renwu", "任务" },
+    { "renzhen", "认真" },
     { "rexiao", "热销" },
     { "riben", "日本" },
+    { "rili", "日历" },
+    { "riqi", "日期" },
     { "riyuen", "日元" },
+    { "rongliang", "容量" },
+    { "rongyi", "容易" },
+    { "rongyu", "荣誉" },
     { "ruguo", "如果" },
+    { "saoma", "扫码" },
     { "shanchu", "删除" },
+    { "shangban", "上班" },
     { "shangchuan", "上传" },
     { "shanghai", "上海" },
+    { "shangpin", "商品" },
+    { "shangsheng", "上升" },
     { "shangwu", "上午" },
+    { "shangxia", "上下" },
+    { "shangxin", "伤心" },
     { "shaodeng", "稍等" },
+    { "shehui", "社会" },
+    { "shengchan", "生产" },
+    { "shenghuo", "生活" },
     { "shengji", "升级" },
     { "shengqi", "生气" },
+    { "shengri", "生日" },
     { "shengyin", "声音" },
     { "shenme", "什么" },
+    { "shenpi", "审批" },
+    { "shenqing", "申请" },
+    { "shenru", "深入" },
     { "shenzhen", "深圳" },
     { "shezhi", "设置" },
     { "shibai", "失败" },
+    { "shibie", "识别" },
     { "shichang", "市场" },
+    { "shifu", "师傅" },
+    { "shijian", "时间" },
+    { "shijie", "世界" },
     { "shipin", "视频" },
+    { "shipinhao", "食品" },
+    { "shiyong", "使用" },
     { "shizhi", "市值" },
     { "shoucang", "收藏" },
+    { "shouhuo", "收获" },
     { "shouji", "手机" },
+    { "shouming", "寿命" },
+    { "shouqi", "收起" },
+    { "shouye", "首页" },
+    { "shouyi", "收益" },
     { "shuaxin", "刷新" },
     { "shuijiao", "睡觉" },
+    { "shuiping", "水平" },
+    { "shuju", "数据" },
+    { "shuohua", "说话" },
+    { "shuru", "输入" },
+    { "shuxue", "数学" },
+    { "sichuan", "四川" },
+    { "siji", "司机" },
     { "sousuo", "搜索" },
     { "suiran", "虽然" },
     { "suoyi", "所以" },
+    { "suoyou", "所有" },
+    { "taidu", "态度" },
     { "taiwan", "台湾" },
     { "taoyan", "讨厌" },
     { "tianjia", "添加" },
     { "tianqi", "天气" },
     { "tingzhi", "停止" },
+    { "tisheng", "提升" },
+    { "tishi", "提示" },
+    { "tongguo", "通过" },
     { "tongshi", "同事" },
+    { "tongxun", "通讯" },
+    { "tongyi", "同意" },
     { "tongzhi", "通知" },
+    { "touxiang", "头像" },
     { "touzi", "投资" },
+    { "tuandui", "团队" },
     { "tuichu", "退出" },
     { "tuijian", "推荐" },
     { "tupian", "图片" },
+    { "waiyu", "外语" },
     { "wancheng", "完成" },
     { "wangluo", "网络" },
+    { "wangzhan", "网站" },
     { "wanjia", "玩家" },
     { "wanshang", "晚上" },
+    { "weidu", "维度" },
     { "weishenme", "为什么" },
     { "weixin", "微信" },
     { "weixiu", "维修" },
+    { "wending", "稳定" },
     { "wendu", "温度" },
+    { "wenhua", "文化" },
+    { "wenjuan", "问卷" },
     { "wenti", "问题" },
     { "wenzi", "文字" },
-    { "wifi", "无线" },
-    { "wifii", "无线" },
+    { "wojia", "我家" },
+    { "women", "我们" },
+    { "wulianwang", "物联网" },
+    { "wuliao", "无聊" },
     { "wuxian", "无线" },
+    { "xiabu", "下部" },
+    { "xiangfa", "想法" },
     { "xianggang", "香港" },
+    { "xiangjiao", "香蕉" },
+    { "xiangmu", "项目" },
+    { "xiangnian", "想念" },
+    { "xiangqing", "详情" },
     { "xianjia", "现价" },
+    { "xianshi", "显示" },
+    { "xiansuo", "线索" },
     { "xianzai", "现在" },
+    { "xiaoguo", "效果" },
     { "xiaohua", "笑话" },
     { "xiaoshi", "小时" },
     { "xiaoshihou", "小时候" },
     { "xiaoxi", "消息" },
+    { "xiaoxue", "小学" },
     { "xiaoyu", "下雨" },
     { "xiaozhu", "小助" },
     { "xiawu", "下午" },
     { "xiazai", "下载" },
+    { "xiehui", "协会" },
+    { "xieru", "写入" },
     { "xiexie", "谢谢" },
     { "xihuan", "喜欢" },
+    { "xinchun", "新春" },
+    { "xingbie", "性别" },
+    { "xingcheng", "行程" },
     { "xingde", "行的" },
+    { "xinghao", "型号" },
+    { "xingqi", "星期" },
     { "xingqu", "兴趣" },
+    { "xinlai", "信赖" },
     { "xinwen", "新闻" },
+    { "xinxin", "信心" },
+    { "xiugai", "修改" },
     { "xiuxi", "休息" },
+    { "xuanze", "选择" },
+    { "xuanzhe", "选择" },
     { "xuesheng", "学生" },
     { "xuexi", "学习" },
+    { "xuexiao", "学校" },
+    { "yanchi", "延迟" },
+    { "yanjiu", "研究" },
+    { "yanse", "颜色" },
+    { "yansehao", "颜色好" },
+    { "yanzheng", "验证" },
+    { "yaoqing", "邀请" },
+    { "yaoqiu", "要求" },
+    { "yewu", "业务" },
     { "yichang", "异常" },
     { "yichu", "移除" },
     { "yiding", "一定" },
     { "yihou", "以后" },
+    { "yijian", "意见" },
     { "yijing", "已经" },
+    { "yiliao", "医疗" },
     { "yinggai", "应该" },
     { "yingli", "盈利" },
+    { "yingwen", "英文" },
+    { "yingxiang", "影响" },
+    { "yingxiao", "营销" },
+    { "yingyong", "应用" },
     { "yinliang", "音量" },
+    { "yinsi", "隐私" },
     { "yinwei", "因为" },
     { "yinyue", "音乐" },
     { "yiqian", "以前" },
+    { "yiyi", "意义" },
+    { "yonghu", "用户" },
+    { "yongqi", "勇气" },
+    { "youhao", "友好" },
     { "youhui", "优惠" },
+    { "youhuiquan", "优惠券" },
+    { "youjian", "邮件" },
+    { "youqing", "友情" },
     { "youxi", "游戏" },
     { "youxian", "有线" },
+    { "youxiang", "邮箱" },
+    { "yuanfang", "远方" },
     { "yuanjia", "原价" },
+    { "yuanlai", "原来" },
+    { "yuedu", "阅读" },
     { "yundong", "运动" },
+    { "yunxu", "允许" },
+    { "yuyan", "语言" },
     { "yuyin", "语音" },
+    { "zaihu", "在乎" },
     { "zaijian", "再见" },
     { "zaixian", "在线" },
+    { "zaocan", "早餐" },
     { "zaoshang", "早上" },
+    { "zengjia", "增加" },
     { "zenme", "怎么" },
     { "zenmeyang", "怎么样" },
     { "zhangdie", "涨跌" },
     { "zhangfu", "涨幅" },
     { "zhanghao", "账号" },
+    { "zhanghu", "账户" },
+    { "zhaopian", "照片" },
+    { "zhaung", "装" },
+    { "zhejiang", "浙江" },
     { "zhekou", "折扣" },
     { "zheli", "这里" },
+    { "zhengce", "政策" },
     { "zhengchang", "正常" },
+    { "zhengming", "证明" },
     { "zhengque", "正确" },
     { "zhengzai", "正在" },
+    { "zhichi", "支持" },
+    { "zhidao", "知道" },
+    { "zhiye", "职业" },
+    { "zhongdian", "重点" },
     { "zhongguo", "中国" },
+    { "zhongwen", "中文" },
+    { "zhongxin", "中心" },
+    { "zhongyao", "重要" },
     { "zhuanfa", "转发" },
+    { "zhuanye", "专业" },
     { "zhuli", "助理" },
+    { "zhunbei", "准备" },
     { "zhuye", "主页" },
+    { "zhuyi", "注意" },
+    { "zixin", "自信" },
     { "zixuan", "自选" },
+    { "ziyuan", "资源" },
+    { "zongjie", "总结" },
+    { "zuiba", "嘴巴" },
+    { "zuihao", "最好" },
+    { "zuijin", "最近" },
     { "zuotian", "昨天" },
+    { "zuowei", "作为" },
+    { "zuoye", "作业" },
 };
-static const int s_words_n = 232;
+static const int s_words_n = 566;
 
-/* Single-syllable characters. */
 static const muse_py_entry_t s_syl[] = {
     { "a", "啊阿呀" },
     { "ai", "爱矮挨癌艾碍" },
@@ -645,6 +977,34 @@ static const muse_py_entry_t s_syl[] = {
 static const int s_syl_n = 398;
 
 
+static char letter_digit(char c)
+{
+    if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+    if (c >= 'a' && c <= 'c') return '2';
+    if (c >= 'd' && c <= 'f') return '3';
+    if (c >= 'g' && c <= 'i') return '4';
+    if (c >= 'j' && c <= 'l') return '5';
+    if (c >= 'm' && c <= 'o') return '6';
+    if (c >= 'p' && c <= 's') return '7';
+    if (c >= 't' && c <= 'v') return '8';
+    if (c >= 'w' && c <= 'z') return '9';
+    return 0;
+}
+
+char muse_pinyin_letter_digit(char c) { return letter_digit(c); }
+
+static int encode_digits(const char *py, char *out, int max)
+{
+    int n = 0;
+    for (; *py && n < max - 1; py++) {
+        char d = letter_digit(*py);
+        if (!d) return -1;
+        out[n++] = d;
+    }
+    out[n] = 0;
+    return n;
+}
+
 static int utf8_char_len(unsigned char c)
 {
     if (c < 0x80) return 1;
@@ -654,26 +1014,8 @@ static int utf8_char_len(unsigned char c)
     return 1;
 }
 
-static int push_cand(const char **out, int n, int max, const char *s, int nbytes)
-{
-    if (n >= max || nbytes <= 0) return n;
-    /* Skip duplicates already in out (compare nbytes). */
-    for (int i = 0; i < n; i++) {
-        if ((int)strlen(out[i]) == nbytes && memcmp(out[i], s, (size_t)nbytes) == 0) {
-            return n;
-        }
-    }
-    /* Caller must keep storage; we return pointers into dict strings.
-     * For multi-byte slices we need stable C strings — words are whole;
-     * for chars we point into cands with a trick: only return full words
-     * or we copy into static slots. */
-    (void)s;
-    return n;
-}
-
-/* Stable slots for single-char candidates sliced from dict strings. */
-#define SLOT_MAX 48
-#define SLOT_BYTES 8
+#define SLOT_MAX 64
+#define SLOT_BYTES 16
 static char s_slots[SLOT_MAX][SLOT_BYTES];
 static int s_slot_i;
 
@@ -687,85 +1029,185 @@ static const char *slot_copy(const char *s, int nbytes)
     return d;
 }
 
-static int already(const char **out, int n, const char *s)
+static int already(const muse_py_hit_t *out, int n, const char *s)
 {
     for (int i = 0; i < n; i++) {
-        if (strcmp(out[i], s) == 0) return 1;
+        if (strcmp(out[i].text, s) == 0) return 1;
     }
     return 0;
 }
 
-int muse_pinyin_lookup(const char *py, const char **out, int max)
+static int push_hit(muse_py_hit_t *out, int n, int max, const char *text, int consume)
 {
-    if (!py || !py[0] || !out || max <= 0) return 0;
-    int n = 0;
-    s_slot_i = 0;
-    size_t plen = strlen(py);
+    if (n >= max || !text || !text[0] || consume <= 0) return n;
+    if (already(out, n, text)) return n;
+    out[n].text = text;
+    out[n].consume = (uint8_t)(consume > 255 ? 255 : consume);
+    return n + 1;
+}
 
-    /* 1) Words: exact match first, then prefix (py is prefix of word key OR word key is prefix of py). */
-    for (int i = 0; i < s_words_n && n < max; i++) {
-        const char *k = s_words[i].py;
-        size_t klen = strlen(k);
-        if (klen == plen && strcmp(k, py) == 0) {
-            if (!already(out, n, s_words[i].cands)) out[n++] = s_words[i].cands;
-        }
+static int push_chars(muse_py_hit_t *out, int n, int max, const char *cands, int consume, int limit)
+{
+    int got = 0;
+    const char *c = cands;
+    while (*c && n < max && got < limit) {
+        int cl = utf8_char_len((unsigned char)*c);
+        const char *s = slot_copy(c, cl);
+        if (s) n = push_hit(out, n, max, s, consume);
+        c += cl;
+        got++;
     }
-    for (int i = 0; i < s_words_n && n < max; i++) {
-        const char *k = s_words[i].py;
-        size_t klen = strlen(k);
-        if (klen > plen && strncmp(k, py, plen) == 0) {
-            if (!already(out, n, s_words[i].cands)) out[n++] = s_words[i].cands;
-        }
-    }
-    /* Word key fully consumed as prefix of typed py (e.g. nihaoXX) — skip, syllable path handles rest */
-
-    /* 2) Syllables: exact, then py is prefix of syllable (partial), then syllable is prefix of py. */
-    for (int i = 0; i < s_syl_n && n < max; i++) {
-        const char *k = s_syl[i].py;
-        if (strcmp(k, py) != 0) continue;
-        const char *c = s_syl[i].cands;
-        while (*c && n < max) {
-            int cl = utf8_char_len((unsigned char)*c);
-            const char *s = slot_copy(c, cl);
-            if (s && !already(out, n, s)) out[n++] = s;
-            c += cl;
-        }
-    }
-    if (n == 0) {
-        for (int i = 0; i < s_syl_n && n < max; i++) {
-            const char *k = s_syl[i].py;
-            size_t klen = strlen(k);
-            if (klen > plen && strncmp(k, py, plen) == 0) {
-                const char *c = s_syl[i].cands;
-                while (*c && n < max) {
-                    int cl = utf8_char_len((unsigned char)*c);
-                    const char *s = slot_copy(c, cl);
-                    if (s && !already(out, n, s)) out[n++] = s;
-                    c += cl;
-                }
-            }
-        }
-    }
-    /* If typed py starts with a complete syllable, also offer that syllable's chars. */
-    if (n < max) {
-        for (int i = 0; i < s_syl_n && n < max; i++) {
-            const char *k = s_syl[i].py;
-            size_t klen = strlen(k);
-            if (klen < plen && strncmp(py, k, klen) == 0) {
-                /* only if next char could start a new syllable — always offer */
-                const char *c = s_syl[i].cands;
-                int first = 1;
-                while (*c && n < max && first) {
-                    int cl = utf8_char_len((unsigned char)*c);
-                    const char *s = slot_copy(c, cl);
-                    if (s && !already(out, n, s)) out[n++] = s;
-                    c += cl;
-                    first = 0; /* only first char for prefix-of-py to avoid noise */
-                }
-            }
-        }
-    }
-    (void)push_cand;
     return n;
 }
 
+/* Longest syllable that is a prefix of `py` (letters). */
+static int longest_syl_prefix(const char *py, const char **syl_out)
+{
+    int best = 0;
+    const char *best_s = NULL;
+    size_t plen = strlen(py);
+    for (int i = 0; i < s_syl_n; i++) {
+        size_t klen = strlen(s_syl[i].py);
+        if ((int)klen > best && klen <= plen && strncmp(py, s_syl[i].py, klen) == 0) {
+            best = (int)klen;
+            best_s = s_syl[i].cands;
+        }
+    }
+    if (syl_out) *syl_out = best_s;
+    return best;
+}
+
+/* Longest syllable whose digit encoding is a prefix of `digits`. */
+static int longest_syl_digit_prefix(const char *digits, const char **syl_out, int *syl_dlen)
+{
+    int best = 0;
+    const char *best_s = NULL;
+    size_t dlen = strlen(digits);
+    char buf[16];
+    for (int i = 0; i < s_syl_n; i++) {
+        int n = encode_digits(s_syl[i].py, buf, (int)sizeof(buf));
+        if (n <= 0) continue;
+        if (n > best && (size_t)n <= dlen && strncmp(digits, buf, (size_t)n) == 0) {
+            best = n;
+            best_s = s_syl[i].cands;
+        }
+    }
+    if (syl_out) *syl_out = best_s;
+    if (syl_dlen) *syl_dlen = best;
+    return best;
+}
+
+static int lookup_letters(const char *py, muse_py_hit_t *out, int max)
+{
+    int n = 0;
+    s_slot_i = 0;
+    size_t plen = strlen(py);
+    if (!plen) return 0;
+
+    /* 1) Exact word */
+    for (int i = 0; i < s_words_n && n < max; i++) {
+        if (strcmp(s_words[i].py, py) == 0) {
+            n = push_hit(out, n, max, s_words[i].cands, (int)plen);
+        }
+    }
+    /* 2) Word where typed is a prefix (niha -> 你好) */
+    for (int i = 0; i < s_words_n && n < max; i++) {
+        size_t klen = strlen(s_words[i].py);
+        if (klen > plen && strncmp(s_words[i].py, py, plen) == 0) {
+            /* Selecting a predicted word commits the whole compose buffer. */
+            n = push_hit(out, n, max, s_words[i].cands, (int)plen);
+        }
+    }
+    /* 3) Exact syllable -> chars */
+    for (int i = 0; i < s_syl_n && n < max; i++) {
+        if (strcmp(s_syl[i].py, py) == 0) {
+            n = push_chars(out, n, max, s_syl[i].cands, (int)plen, 8);
+        }
+    }
+    /* 4) Partial syllable (ni -> 你… when still typing nin/ning/…) */
+    if (n < max) {
+        for (int i = 0; i < s_syl_n && n < max; i++) {
+            size_t klen = strlen(s_syl[i].py);
+            if (klen > plen && strncmp(s_syl[i].py, py, plen) == 0) {
+                n = push_chars(out, n, max, s_syl[i].cands, (int)plen, 3);
+            }
+        }
+    }
+    /* 5) Multi-syllable in progress: offer first complete syllable chars
+     *    (nihao -> 你 with consume=2, leaving hao). */
+    {
+        const char *sc = NULL;
+        int sl = longest_syl_prefix(py, &sc);
+        if (sl > 0 && (size_t)sl < plen && sc) {
+            n = push_chars(out, n, max, sc, sl, 6);
+        }
+    }
+    return n;
+}
+
+static int lookup_t9(const char *digits, muse_py_hit_t *out, int max)
+{
+    int n = 0;
+    s_slot_i = 0;
+    size_t dlen = strlen(digits);
+    if (!dlen) return 0;
+    char dbuf[32];
+
+    /* Validate digits */
+    for (size_t i = 0; i < dlen; i++) {
+        if (digits[i] < '2' || digits[i] > '9') return 0;
+    }
+
+    /* 1) Words whose digit encoding equals typed */
+    for (int i = 0; i < s_words_n && n < max; i++) {
+        int dn = encode_digits(s_words[i].py, dbuf, (int)sizeof(dbuf));
+        if (dn == (int)dlen && strcmp(dbuf, digits) == 0) {
+            n = push_hit(out, n, max, s_words[i].cands, (int)dlen);
+        }
+    }
+    /* 2) Words where typed digits are a prefix of word digits */
+    for (int i = 0; i < s_words_n && n < max; i++) {
+        int dn = encode_digits(s_words[i].py, dbuf, (int)sizeof(dbuf));
+        if (dn > (int)dlen && strncmp(dbuf, digits, dlen) == 0) {
+            n = push_hit(out, n, max, s_words[i].cands, (int)dlen);
+        }
+    }
+    /* 3) Exact syllable digit match -> chars */
+    for (int i = 0; i < s_syl_n && n < max; i++) {
+        int dn = encode_digits(s_syl[i].py, dbuf, (int)sizeof(dbuf));
+        if (dn == (int)dlen && strcmp(dbuf, digits) == 0) {
+            n = push_chars(out, n, max, s_syl[i].cands, (int)dlen, 8);
+        }
+    }
+    /* 4) Partial syllable (digit prefix) */
+    if (n < max) {
+        for (int i = 0; i < s_syl_n && n < max; i++) {
+            int dn = encode_digits(s_syl[i].py, dbuf, (int)sizeof(dbuf));
+            if (dn > (int)dlen && strncmp(dbuf, digits, dlen) == 0) {
+                n = push_chars(out, n, max, s_syl[i].cands, (int)dlen, 3);
+            }
+        }
+    }
+    /* 5) First complete syllable under digit buffer */
+    {
+        const char *sc = NULL;
+        int sdl = 0;
+        longest_syl_digit_prefix(digits, &sc, &sdl);
+        if (sdl > 0 && (size_t)sdl < dlen && sc) {
+            n = push_chars(out, n, max, sc, sdl, 6);
+        }
+    }
+    return n;
+}
+
+int muse_pinyin_lookup(const char *py, muse_py_hit_t *out, int max)
+{
+    if (!py || !out || max <= 0) return 0;
+    return lookup_letters(py, out, max);
+}
+
+int muse_pinyin_lookup_t9(const char *digits, muse_py_hit_t *out, int max)
+{
+    if (!digits || !out || max <= 0) return 0;
+    return lookup_t9(digits, out, max);
+}

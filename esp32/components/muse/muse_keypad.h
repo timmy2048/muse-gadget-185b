@@ -5,9 +5,9 @@
 #include "lvgl.h"
 
 /*
- * A phone-style keypad for small touch screens: twelve big keys with a few
- * characters each. Default mode is toneless pinyin (拼) with a candidate bar;
- * the mode key cycles 拼 → abc → 123 → #+=. Only one keypad exists at a time.
+ * Round/rect touch keypad with Chinese IME:
+ *   全键 (26-key pinyin) → 九键 (T9 digit pinyin) → abc → 123 → #+=
+ * Candidate bar above keys; only one keypad at a time.
  */
 
 lv_obj_t *muse_keypad_create(lv_obj_t *parent, lv_obj_t *ta, bool round);
