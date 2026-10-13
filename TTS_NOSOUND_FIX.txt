@@ -1,0 +1,19 @@
+﻿NO-SOUND FIX
+============
+Root cause (prior capture):
+  TTS HTTP 500 err=ESP_OK got 120 bytes
+  TTS fetch failed; falling back to silent captions
+Youdao dictvoice returned HTTP 500 (broken/blocked). Device correctly fell back to silent caption pacing — Chinese text OK, no speaker audio.
+
+Fix:
+- Default TTS -> Google translate_tts (googleapis, client=gtx)
+  ZH: ...tl=zh-CN&q=  EN: ...tl=en&q=
+- Strict MP3 check (HTTP 2xx + >64 bytes + 0xFF sync); discard error bodies
+- Browser User-Agent; percent-encode (no +)
+- Flashed COM3
+
+Expect after fix:
+  speaking message ...
+  TTS HTTP 200 ... got N bytes
+  reply audio: 24000 Hz (or similar)
+  muse reply: X.XXs of audio

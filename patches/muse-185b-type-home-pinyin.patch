@@ -1,0 +1,2034 @@
+﻿diff --git a/esp32/components/muse/CMakeLists.txt b/esp32/components/muse/CMakeLists.txt
+index c3e7013..96cf538 100644
+--- a/esp32/components/muse/CMakeLists.txt
++++ b/esp32/components/muse/CMakeLists.txt
+@@ -37,8 +37,10 @@ if(CONFIG_MUSE_ENABLED)
+         "muse_adpcm.c"
+         "muse_settings.c"
+         "muse_settings_ui.c"
++        "muse_ota_check.c"
+         "muse_text.c"
+         "muse_keypad.c"
++        "muse_pinyin.c"
+         "muse_lv_mem.c"
+         "muse_link.c"
+         "muse_ble.c")
+@@ -65,6 +67,8 @@ if(CONFIG_MUSE_ENABLED)
+     if(CONFIG_MUSE_BOARD_WAVESHARE_S3_175C OR CONFIG_MUSE_BOARD_WAVESHARE_S3_175)
+         # One driver: the 1.75 differs only in pins (its BSP's) and its PWR key.
+         list(APPEND srcs "boards/board_waveshare_s3_175c.c" "boards/muse_lcd_bands.c")
++    elseif(CONFIG_MUSE_BOARD_WAVESHARE_S3_185B)
++        list(APPEND srcs "boards/board_waveshare_s3_185b.c" "boards/muse_lcd_bands.c")
+     elseif(CONFIG_MUSE_BOARD_WAVESHARE_S3_216)
+         list(APPEND srcs "boards/board_waveshare_s3_216.c" "boards/muse_lcd_bands.c")
+     elseif(CONFIG_MUSE_BOARD_AIPI)
+diff --git a/esp32/components/muse/muse_keypad.c b/esp32/components/muse/muse_keypad.c
+index f86abd5..08aa54f 100644
+--- a/esp32/components/muse/muse_keypad.c
++++ b/esp32/components/muse/muse_keypad.c
+@@ -1,47 +1,47 @@
+ /*
+- * Copyright (c) Meta Platforms, Inc. and affiliates.
+- *
+- * Licensed under the Apache License, Version 2.0 (the "License");
+- * you may not use this file except in compliance with the License.
+- * You may obtain a copy of the License at
+- *
+- *     http://www.apache.org/licenses/LICENSE-2.0
+- *
+- * Unless required by applicable law or agreed to in writing, software
+- * distributed under the License is distributed on an "AS IS" BASIS,
+- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+- * See the License for the specific language governing permissions and
+- * limitations under the License.
++ * Phone-style keypad for small touch screens, with optional toneless pinyin IME.
++ * Modes: 鎷?(pinyin) 鈫?abc 鈫?123 鈫?#+= . Candidate bar sits above the keys.
+  */
+-
+ #include "muse_keypad.h"
++#include "muse_pinyin.h"
++#include "sdkconfig.h"
+ 
+ #include <ctype.h>
++#include <stdio.h>
++#include <stdint.h>
+ #include <string.h>
+ 
++#if CONFIG_MUSE_CJK_FONT
++#include "lvgl.h"
++LV_FONT_DECLARE(muse_font_cjk_16)
++#endif
++
+ #define COLOR_TEXT 0xf2efff
+ #define COLOR_CARD 0x1a1530
+ #define COLOR_CARD_PRESSED 0x2e2552
+ #define COLOR_ACCENT 0xa77dff
++#define COLOR_DIM 0x8a82a8
+ 
+-#define TAP_MS 1000    /* a second tap on the same key within this steps to its next character */
+-#define HOLD_MS 600    /* holding a letter key this long types its digit */
++#define TAP_MS 1000
++#define HOLD_MS 600
++#define PY_MAX 24
++#define CAND_MAX 8
++#define CAND_BAR_H 30
+ 
+-enum { LETTERS, DIGITS, SYMBOLS, MODE_COUNT };
++enum { PINYIN, LETTERS, DIGITS, SYMBOLS, MODE_COUNT };
+ 
+-/* Keys: twelve in four rows of three, then the bottom row. They're also the
+- * button matrix's ids, but for a round screen's bottom row (key_button()). */
+ enum { KEY_SHIFT = 9, KEY_SPACE = 10, KEY_BACKSPACE = 11, KEY_MODE, KEY_SHOW, KEY_DONE, KEY_COUNT };
+ 
+-/* What each of the twelve keys types, in tap order. NULL for shift and backspace. */
+ static const char *const CHARS[MODE_COUNT][12] = {
++    /* PINYIN: same multitap letters as LETTERS; digits on hold */
++    { ".-_@1", "abc2", "def3", "ghi4", "jkl5", "mno6", "pqrs7", "tuv8", "wxyz9", NULL, " 0", NULL },
+     { ".-_@1", "abc2", "def3", "ghi4", "jkl5", "mno6", "pqrs7", "tuv8", "wxyz9", NULL, " 0", NULL },
+     { "1", "2", "3", "4", "5", "6", "7", "8", "9", ".", "0", NULL },
+-    /* Every other printable ASCII character. */
+     { ".,?!", "@#$%", "&*+=", "-_/\\", "()[]", "{}<>", "'\"`", ":;|", "^~", " ", "0", NULL },
+ };
+ 
+ static const char *const LABELS[MODE_COUNT][12] = {
++    { ".-_@", "abc", "def", "ghi", "jkl", "mno", "pqrs", "tuv", "wxyz", LV_SYMBOL_UP, "space", LV_SYMBOL_BACKSPACE },
+     { ".-_@", "abc", "def", "ghi", "jkl", "mno", "pqrs", "tuv", "wxyz", LV_SYMBOL_UP, "space", LV_SYMBOL_BACKSPACE },
+     { "1", "2", "3", "4", "5", "6", "7", "8", "9", ".", "0", LV_SYMBOL_BACKSPACE },
+     { ".,?!", "@#$%", "&*+=", "-_/\\", "()[]", "{}<>", "'\"`", ":;|", "^~", "space", "0", LV_SYMBOL_BACKSPACE },
+@@ -49,27 +49,48 @@ static const char *const LABELS[MODE_COUNT][12] = {
+ 
+ static const char *const UPPER_LABELS[9] = { ".-_@", "ABC", "DEF", "GHI", "JKL", "MNO", "PQRS", "TUV", "WXYZ" };
+ 
+-/* The mode key names the mode it switches to. */
+-static const char *const NEXT_MODE[MODE_COUNT] = { "123", "#+=", "abc" };
++/* Mode key names the mode it switches TO. */
++static const char *const NEXT_MODE[MODE_COUNT] = { "abc", "123", "#+=", "鎷? };
+ 
+ static lv_obj_t *s_kp, *s_ta;
++static lv_obj_t *s_cand_bar, *s_py_lbl;
++static lv_obj_t *s_cand_btns[CAND_MAX];
+ static lv_timer_t *s_tap_timer;
+-static const char *s_map[KEY_COUNT + 2 + 4 + 1];   /* keys, spacers, row ends, the end */
+-static bool s_round;         /* a hidden spacer at each end of the bottom row */
++static const char *s_map[KEY_COUNT + 2 + 4 + 1];
++static bool s_round;
+ static int s_mode;
+ static bool s_upper;
+-static int s_pending = -1;   /* the key whose character can still change */
++static int s_pending = -1;
+ static int s_step;
+ static uint32_t s_pressed_ms;
+-static bool s_held;          /* this press already typed its digit */
++static bool s_held;
++
++static char s_py[PY_MAX];
++static const char *s_cands[CAND_MAX];
++static int s_cand_n;
++static char s_cand_owned[CAND_MAX][32]; /* copy of candidate text for button labels */
++
++#if CONFIG_MUSE_CJK_FONT
++static const lv_font_t *cjk_font(void)
++{
++    static lv_font_t font;
++    static bool ready;
++    if (!ready) {
++        font = lv_font_montserrat_16;
++        font.fallback = &muse_font_cjk_16;
++        ready = true;
++    }
++    return &font;
++}
++#else
++static const lv_font_t *cjk_font(void) { return &lv_font_montserrat_16; }
++#endif
+ 
+-/* The button matrix's id for a key: past the round screen's first spacer. */
+ static int key_button(int key)
+ {
+     return s_round && key >= KEY_MODE ? key + 1 : key;
+ }
+ 
+-/* The key a button is, or -1 for a spacer (or none). */
+ static int button_key(uint32_t btn)
+ {
+     int key = s_round && btn >= KEY_MODE ? (int)btn - 1 : (int)btn;
+@@ -89,13 +110,14 @@ static void update_map(void)
+ {
+     int i = 0;
+     for (int k = 0; k < 12; k++) {
+-        s_map[i++] = s_mode == LETTERS && s_upper && k < 9 ? UPPER_LABELS[k] : LABELS[s_mode][k];
++        s_map[i++] = s_mode == LETTERS && s_upper && k < 9 ? UPPER_LABELS[k]
++                     : LABELS[s_mode][k];
+         if (k % 3 == 2) {
+             s_map[i++] = "\n";
+         }
+     }
+     if (s_round) {
+-        s_map[i++] = " ";   /* a hidden spacer: an empty label would end the map */
++        s_map[i++] = " ";
+     }
+     s_map[i++] = NEXT_MODE[s_mode];
+     s_map[i++] = lv_textarea_get_password_mode(s_ta) ? "Show" : "Hide";
+@@ -108,7 +130,6 @@ static void update_map(void)
+     set_ctrl(KEY_SHIFT, LV_BUTTONMATRIX_CTRL_CHECKED, s_mode == LETTERS && s_upper);
+ }
+ 
+-/* The pending character is final. */
+ static void commit(void)
+ {
+     if (s_pending >= 0 && s_kp) {
+@@ -131,7 +152,100 @@ static void add_char(char c)
+     lv_textarea_add_char(s_ta, (uint32_t)(unsigned char)c);
+ }
+ 
+-static void type_key(int key)
++static void add_utf8(const char *s)
++{
++    if (!s || !s[0]) {
++        return;
++    }
++    lv_textarea_add_text(s_ta, s);
++}
++
++static void refresh_cands(void);
++
++static void clear_py(void)
++{
++    s_py[0] = 0;
++    refresh_cands();
++}
++
++static void refresh_cands(void)
++{
++    s_cand_n = 0;
++    if (s_mode == PINYIN && s_py[0]) {
++        s_cand_n = muse_pinyin_lookup(s_py, s_cands, CAND_MAX);
++        for (int i = 0; i < s_cand_n; i++) {
++            strncpy(s_cand_owned[i], s_cands[i], sizeof(s_cand_owned[i]) - 1);
++            s_cand_owned[i][sizeof(s_cand_owned[i]) - 1] = 0;
++        }
++    }
++    if (s_py_lbl) {
++        if (s_mode == PINYIN && s_py[0]) {
++            char buf[48];
++            snprintf(buf, sizeof(buf), "%s", s_py);
++            lv_label_set_text(s_py_lbl, buf);
++            lv_obj_remove_flag(s_py_lbl, LV_OBJ_FLAG_HIDDEN);
++        } else {
++            lv_label_set_text(s_py_lbl, "");
++            lv_obj_add_flag(s_py_lbl, LV_OBJ_FLAG_HIDDEN);
++        }
++    }
++    if (!s_cand_bar) {
++        return;
++    }
++    for (int i = 0; i < CAND_MAX; i++) {
++        if (!s_cand_btns[i]) {
++            continue;
++        }
++        if (i < s_cand_n) {
++            lv_obj_t *lab = lv_obj_get_child(s_cand_btns[i], 0);
++            if (lab) {
++                lv_label_set_text(lab, s_cand_owned[i]);
++            }
++            lv_obj_remove_flag(s_cand_btns[i], LV_OBJ_FLAG_HIDDEN);
++        } else {
++            lv_obj_add_flag(s_cand_btns[i], LV_OBJ_FLAG_HIDDEN);
++        }
++    }
++    if (s_mode == PINYIN && (s_py[0] || s_cand_n > 0)) {
++        lv_obj_remove_flag(s_cand_bar, LV_OBJ_FLAG_HIDDEN);
++    } else {
++        lv_obj_add_flag(s_cand_bar, LV_OBJ_FLAG_HIDDEN);
++    }
++}
++
++static void pick_cand(int idx)
++{
++    if (idx < 0 || idx >= s_cand_n) {
++        return;
++    }
++    add_utf8(s_cand_owned[idx]);
++    clear_py();
++}
++
++static void on_cand_clicked(lv_event_t *e)
++{
++    int idx = (int)(intptr_t)lv_event_get_user_data(e);
++    pick_cand(idx);
++}
++
++static void py_add_letter(char c)
++{
++    size_t n = strlen(s_py);
++    if (n + 1 >= sizeof(s_py)) {
++        return;
++    }
++    if (c >= 'A' && c <= 'Z') {
++        c = (char)(c - 'A' + 'a');
++    }
++    if (c < 'a' || c > 'z') {
++        return;
++    }
++    s_py[n] = c;
++    s_py[n + 1] = 0;
++    refresh_cands();
++}
++
++static void type_key_ascii(int key)
+ {
+     const char *chars = CHARS[s_mode][key];
+     int n = (int)strlen(chars);
+@@ -151,7 +265,7 @@ static void type_key(int key)
+     size_t before = strlen(lv_textarea_get_text(s_ta));
+     add_char(s_upper && s_mode == LETTERS ? (char)toupper((unsigned char)c) : c);
+     if (strlen(lv_textarea_get_text(s_ta)) == before) {
+-        commit();   /* full: there's nothing to replace on the next tap */
++        commit();
+         return;
+     }
+     s_pending = key;
+@@ -160,13 +274,77 @@ static void type_key(int key)
+     lv_timer_resume(s_tap_timer);
+ }
+ 
+-/* The digit a held key types, or 0. */
++/* Pinyin multitap: pending letter lives in py buffer, not textarea. */
++static void type_key_pinyin(int key)
++{
++    const char *chars = CHARS[PINYIN][key];
++    if (!chars) {
++        return;
++    }
++    int n = (int)strlen(chars);
++    /* Prefer letters over trailing digit for pinyin. */
++    char letters[8];
++    int ln = 0;
++    for (int i = 0; i < n && ln < (int)sizeof(letters) - 1; i++) {
++        if (chars[i] >= 'a' && chars[i] <= 'z') {
++            letters[ln++] = chars[i];
++        }
++    }
++    letters[ln] = 0;
++    if (ln == 0) {
++        /* space / symbols 鈥?commit first cand or insert char */
++        if (key == KEY_SPACE) {
++            if (s_cand_n > 0) {
++                commit();
++                pick_cand(0);
++            } else if (!s_py[0]) {
++                commit();
++                add_char(' ');
++            }
++            return;
++        }
++        commit();
++        add_char(chars[0]);
++        return;
++    }
++    if (key == s_pending) {
++        s_step = (s_step + 1) % ln;
++        /* replace last py letter */
++        size_t plen = strlen(s_py);
++        if (plen > 0) {
++            s_py[plen - 1] = letters[s_step];
++        }
++    } else {
++        commit();
++        s_step = 0;
++        py_add_letter(letters[0]);
++        s_pending = key;
++        set_ctrl(key, LV_BUTTONMATRIX_CTRL_CHECKED, true);
++        lv_timer_reset(s_tap_timer);
++        lv_timer_resume(s_tap_timer);
++        return;
++    }
++    refresh_cands();
++    set_ctrl(key, LV_BUTTONMATRIX_CTRL_CHECKED, true);
++    lv_timer_reset(s_tap_timer);
++    lv_timer_resume(s_tap_timer);
++}
++
++static void type_key(int key)
++{
++    if (s_mode == PINYIN) {
++        type_key_pinyin(key);
++    } else {
++        type_key_ascii(key);
++    }
++}
++
+ static char held_digit(int key)
+ {
+-    if (key < 0 || key >= 12 || s_mode != LETTERS || !CHARS[LETTERS][key]) {
++    if (key < 0 || key >= 12 || (s_mode != LETTERS && s_mode != PINYIN) || !CHARS[s_mode][key]) {
+         return 0;
+     }
+-    const char *chars = CHARS[LETTERS][key];
++    const char *chars = CHARS[s_mode][key];
+     char last = chars[strlen(chars) - 1];
+     return isdigit((unsigned char)last) ? last : 0;
+ }
+@@ -174,7 +352,7 @@ static char held_digit(int key)
+ static void on_key(lv_event_t *e)
+ {
+     lv_event_code_t code = lv_event_get_code(e);
+-    int key = button_key(lv_buttonmatrix_get_selected_button(s_kp));   /* -1 while slid off a key */
++    int key = button_key(lv_buttonmatrix_get_selected_button(s_kp));
+ 
+     if (code == LV_EVENT_PRESSED) {
+         s_pressed_ms = lv_tick_get();
+@@ -186,12 +364,14 @@ static void on_key(lv_event_t *e)
+         if (digit && !s_held && lv_tick_elaps(s_pressed_ms) >= HOLD_MS) {
+             s_held = true;
+             commit();
++            if (s_mode == PINYIN && s_py[0]) {
++                clear_py();
++            }
+             add_char(digit);
+         }
+         return;
+     }
+ 
+-    /* LV_EVENT_VALUE_CHANGED: keys fire on release, backspace on press and while held. */
+     key = button_key(*(const uint32_t *)lv_event_get_param(e));
+     if (key < 0 || s_held) {
+         return;
+@@ -199,21 +379,36 @@ static void on_key(lv_event_t *e)
+     switch (key) {
+     case KEY_BACKSPACE:
+         commit();
+-        lv_textarea_delete_char(s_ta);
++        if (s_mode == PINYIN && s_py[0]) {
++            s_py[strlen(s_py) - 1] = 0;
++            refresh_cands();
++        } else {
++            lv_textarea_delete_char(s_ta);
++        }
+         break;
+     case KEY_SHIFT:
+         if (s_mode == LETTERS) {
+             commit();
+             s_upper = !s_upper;
+             update_map();
++        } else if (s_mode == PINYIN) {
++            /* Shift in pinyin: commit first candidate if any */
++            if (s_cand_n > 0) {
++                pick_cand(0);
++            }
+         } else {
+             type_key(key);
+         }
+         break;
+     case KEY_MODE:
+         commit();
++        if (s_mode == PINYIN && s_py[0]) {
++            clear_py();
++        }
+         s_mode = (s_mode + 1) % MODE_COUNT;
++        s_upper = false;
+         update_map();
++        refresh_cands();
+         break;
+     case KEY_SHOW:
+         lv_textarea_set_password_mode(s_ta, !lv_textarea_get_password_mode(s_ta));
+@@ -221,8 +416,23 @@ static void on_key(lv_event_t *e)
+         break;
+     case KEY_DONE:
+         commit();
++        if (s_mode == PINYIN && s_cand_n > 0) {
++            pick_cand(0);
++        }
++        if (s_mode == PINYIN && s_py[0]) {
++            /* leftover letters: dump as latin */
++            add_utf8(s_py);
++            clear_py();
++        }
+         lv_obj_send_event(s_kp, LV_EVENT_READY, NULL);
+         break;
++    case KEY_SPACE:
++        if (s_mode == PINYIN) {
++            type_key_pinyin(KEY_SPACE);
++        } else {
++            type_key(key);
++        }
++        break;
+     default:
+         if (key < 12) {
+             type_key(key);
+@@ -231,7 +441,6 @@ static void on_key(lv_event_t *e)
+     }
+ }
+ 
+-/* Moving the cursor mustn't let the next tap replace a character somewhere else. */
+ static void on_ta_pressed(lv_event_t *e)
+ {
+     (void)e;
+@@ -240,7 +449,6 @@ static void on_ta_pressed(lv_event_t *e)
+ 
+ static void on_delete(lv_event_t *e)
+ {
+-    /* A page being replaced can go after its successor was made. */
+     if (lv_event_get_target(e) != s_kp) {
+         return;
+     }
+@@ -250,33 +458,81 @@ static void on_delete(lv_event_t *e)
+     }
+     s_kp = NULL;
+     s_ta = NULL;
++    s_cand_bar = NULL;
++    s_py_lbl = NULL;
++    for (int i = 0; i < CAND_MAX; i++) {
++        s_cand_btns[i] = NULL;
++    }
+     s_pending = -1;
++    s_py[0] = 0;
++}
++
++static void build_cand_bar(lv_obj_t *parent)
++{
++    s_cand_bar = lv_obj_create(parent);
++    lv_obj_remove_style_all(s_cand_bar);
++    lv_obj_set_size(s_cand_bar, lv_pct(100), CAND_BAR_H);
++    lv_obj_set_style_pad_hor(s_cand_bar, s_round ? 28 : 8, 0);
++    lv_obj_set_flex_flow(s_cand_bar, LV_FLEX_FLOW_ROW);
++    lv_obj_set_flex_align(s_cand_bar, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
++    lv_obj_set_style_pad_column(s_cand_bar, 4, 0);
++    lv_obj_add_flag(s_cand_bar, LV_OBJ_FLAG_HIDDEN);
++    lv_obj_remove_flag(s_cand_bar, LV_OBJ_FLAG_SCROLLABLE);
++    lv_obj_add_flag(s_cand_bar, LV_OBJ_FLAG_SCROLL_ELASTIC);
++    lv_obj_set_scroll_dir(s_cand_bar, LV_DIR_HOR);
++
++    s_py_lbl = lv_label_create(s_cand_bar);
++    lv_obj_set_style_text_font(s_py_lbl, &lv_font_montserrat_14, 0);
++    lv_obj_set_style_text_color(s_py_lbl, lv_color_hex(COLOR_ACCENT), 0);
++    lv_label_set_text(s_py_lbl, "");
++    lv_obj_add_flag(s_py_lbl, LV_OBJ_FLAG_HIDDEN);
++
++    for (int i = 0; i < CAND_MAX; i++) {
++        lv_obj_t *b = lv_button_create(s_cand_bar);
++        lv_obj_remove_style_all(b);
++        lv_obj_set_height(b, CAND_BAR_H - 4);
++        lv_obj_set_style_pad_hor(b, 8, 0);
++        lv_obj_set_style_radius(b, 8, 0);
++        lv_obj_set_style_bg_opa(b, LV_OPA_COVER, 0);
++        lv_obj_set_style_bg_color(b, lv_color_hex(COLOR_CARD), 0);
++        lv_obj_set_style_bg_color(b, lv_color_hex(COLOR_CARD_PRESSED), LV_STATE_PRESSED);
++        lv_obj_t *lab = lv_label_create(b);
++        lv_obj_set_style_text_font(lab, cjk_font(), 0);
++        lv_obj_set_style_text_color(lab, lv_color_hex(COLOR_TEXT), 0);
++        lv_label_set_text(lab, "");
++        lv_obj_center(lab);
++        lv_obj_add_event_cb(b, on_cand_clicked, LV_EVENT_CLICKED, (void *)(intptr_t)i);
++        lv_obj_add_flag(b, LV_OBJ_FLAG_HIDDEN);
++        s_cand_btns[i] = b;
++    }
+ }
+ 
+ lv_obj_t *muse_keypad_create(lv_obj_t *parent, lv_obj_t *ta, bool round)
+ {
++    build_cand_bar(parent);
++
+     s_kp = lv_buttonmatrix_create(parent);
+     s_ta = ta;
+     s_round = round;
+-    s_mode = LETTERS;
++    s_mode = PINYIN; /* default Chinese for Muse chat */
+     s_upper = false;
+     s_pending = -1;
++    s_py[0] = 0;
+     if (!s_tap_timer) {
+         s_tap_timer = lv_timer_create(on_tap_timer, TAP_MS, NULL);
+     }
+     lv_timer_pause(s_tap_timer);
+-    lv_textarea_set_password_show_time(ta, TAP_MS + 500);   /* long enough to see what the taps chose */
++    lv_textarea_set_password_show_time(ta, TAP_MS + 500);
+ 
+     lv_obj_remove_style_all(s_kp);
+     lv_obj_set_style_pad_gap(s_kp, 6, 0);
+-    lv_obj_set_style_text_font(s_kp, &lv_font_montserrat_20, LV_PART_ITEMS);
++    lv_obj_set_style_text_font(s_kp, cjk_font(), LV_PART_ITEMS);
+     lv_obj_set_style_text_color(s_kp, lv_color_hex(COLOR_TEXT), LV_PART_ITEMS);
+     lv_obj_set_style_bg_opa(s_kp, LV_OPA_COVER, LV_PART_ITEMS);
+     lv_obj_set_style_bg_color(s_kp, lv_color_hex(COLOR_CARD), LV_PART_ITEMS);
+     lv_obj_set_style_bg_color(s_kp, lv_color_hex(COLOR_CARD_PRESSED), LV_PART_ITEMS | LV_STATE_PRESSED);
+     lv_obj_set_style_bg_color(s_kp, lv_color_hex(COLOR_ACCENT), LV_PART_ITEMS | LV_STATE_CHECKED);
+     lv_obj_set_style_radius(s_kp, 12, LV_PART_ITEMS);
+-    /* A swipe across the keys is sloppy typing, not "back": it would lose the text. */
+     lv_obj_remove_flag(s_kp, LV_OBJ_FLAG_GESTURE_BUBBLE);
+ 
+     update_map();
+@@ -289,13 +545,30 @@ lv_obj_t *muse_keypad_create(lv_obj_t *parent, lv_obj_t *ta, bool round)
+     return s_kp;
+ }
+ 
++void muse_keypad_layout(lv_obj_t *kp, int top_y, int width, int height)
++{
++    (void)kp;
++    if (!s_kp) {
++        return;
++    }
++    int cand_h = CAND_BAR_H + 2;
++    if (s_cand_bar) {
++        lv_obj_set_size(s_cand_bar, width, CAND_BAR_H);
++        lv_obj_align(s_cand_bar, LV_ALIGN_TOP_MID, 0, top_y);
++    }
++    lv_obj_set_size(s_kp, width, height - cand_h);
++    lv_obj_align(s_kp, LV_ALIGN_TOP_MID, 0, top_y + cand_h);
++}
++
+ void muse_keypad_reset(lv_obj_t *kp, bool password)
+ {
+     (void)kp;
+     commit();
+-    s_mode = LETTERS;
++    s_mode = password ? LETTERS : PINYIN;
+     s_upper = false;
++    s_py[0] = 0;
+     update_map();
++    refresh_cands();
+ 
+     const lv_buttonmatrix_ctrl_t tap = LV_BUTTONMATRIX_CTRL_CLICK_TRIG | LV_BUTTONMATRIX_CTRL_NO_REPEAT;
+     for (int k = 0; k < KEY_COUNT; k++) {
+@@ -304,15 +577,13 @@ void muse_keypad_reset(lv_obj_t *kp, bool password)
+         }
+     }
+     set_ctrl(KEY_DONE, LV_BUTTONMATRIX_CTRL_CHECKED, true);
+-    /* Without a password the gap where Show was keeps Done apart from the mode key. */
+     set_ctrl(KEY_SHOW, LV_BUTTONMATRIX_CTRL_HIDDEN, !password);
+-    /* Round, Done is no wider than the mode key, so both stay in from the edge. */
+     int done = s_round ? 0 : 1;
+     lv_buttonmatrix_set_button_width(s_kp, key_button(KEY_MODE), password ? 3 : 4);
+     lv_buttonmatrix_set_button_width(s_kp, key_button(KEY_SHOW), password ? 3 : 1);
+     lv_buttonmatrix_set_button_width(s_kp, key_button(KEY_DONE), (password ? 3 : 4) + done);
+     if (s_round) {
+-        const uint32_t spacers[] = { KEY_MODE, KEY_COUNT + 1 };   /* before key_button(KEY_MODE), after Done */
++        const uint32_t spacers[] = { KEY_MODE, KEY_COUNT + 1 };
+         for (int i = 0; i < 2; i++) {
+             lv_buttonmatrix_set_button_ctrl(s_kp, spacers[i], LV_BUTTONMATRIX_CTRL_HIDDEN);
+             lv_buttonmatrix_set_button_width(s_kp, spacers[i], 2);
+diff --git a/esp32/components/muse/muse_keypad.h b/esp32/components/muse/muse_keypad.h
+index c880e7f..97e2437 100644
+--- a/esp32/components/muse/muse_keypad.h
++++ b/esp32/components/muse/muse_keypad.h
+@@ -1,19 +1,3 @@
+-/*
+- * Copyright (c) Meta Platforms, Inc. and affiliates.
+- *
+- * Licensed under the Apache License, Version 2.0 (the "License");
+- * you may not use this file except in compliance with the License.
+- * You may obtain a copy of the License at
+- *
+- *     http://www.apache.org/licenses/LICENSE-2.0
+- *
+- * Unless required by applicable law or agreed to in writing, software
+- * distributed under the License is distributed on an "AS IS" BASIS,
+- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+- * See the License for the specific language governing permissions and
+- * limitations under the License.
+- */
+-
+ #pragma once
+ 
+ #include <stdbool.h>
+@@ -22,16 +6,13 @@
+ 
+ /*
+  * A phone-style keypad for small touch screens: twelve big keys with a few
+- * characters each. Tapping a key again within a second steps to its next
+- * character; holding a letter key types its digit. Other keys switch to
+- * digits and to symbols. Only one keypad exists at a time.
++ * characters each. Default mode is toneless pinyin (鎷? with a candidate bar;
++ * the mode key cycles 鎷?鈫?abc 鈫?123 鈫?#+=. Only one keypad exists at a time.
+  */
+ 
+-/* Types into `ta`. Done sends LV_EVENT_READY to the keypad. Size and place it
+- * like any object; the keys fill it in five rows. On a round screen the bottom
+- * row keeps in from the sides, where the circle cuts it off. */
+ lv_obj_t *muse_keypad_create(lv_obj_t *parent, lv_obj_t *ta, bool round);
+ 
+-/* Back to lower-case letters with nothing pending. A password gets a key that
+- * shows and hides it. */
++/* Place candidate bar + keys: top_y from parent top, total height for both. */
++void muse_keypad_layout(lv_obj_t *kp, int top_y, int width, int height);
++
+ void muse_keypad_reset(lv_obj_t *kp, bool password);
+diff --git a/esp32/components/muse/muse_pinyin.c b/esp32/components/muse/muse_pinyin.c
+new file mode 100644
+index 0000000..27f4bd8
+--- /dev/null
++++ b/esp32/components/muse/muse_pinyin.c
+@@ -0,0 +1,771 @@
++/* Auto-generated compact pinyin dict (simplified Chinese). */
++#include "muse_pinyin.h"
++#include <string.h>
++
++typedef struct { const char *py; const char *cands; } muse_py_entry_t;
++
++/* Exact multi-char words (matched by full or prefix of remaining buffer). */
++static const muse_py_entry_t s_words[] = {
++    { "agu", "A鑲? },
++    { "aihao", "鐖卞ソ" },
++    { "anquan", "瀹夊叏" },
++    { "baifenbi", "鐧惧垎姣? },
++    { "banben", "鐗堟湰" },
++    { "bangding", "缁戝畾" },
++    { "bangzhu", "甯姪" },
++    { "baocun", "淇濆瓨" },
++    { "baojing", "鎶ヨ" },
++    { "baoqian", "鎶辨瓑" },
++    { "baoyang", "淇濆吇" },
++    { "beijing", "鍖椾含" },
++    { "bingqie", "骞朵笖" },
++    { "bixu", "蹇呴』" },
++    { "budui", "涓嶅" },
++    { "buhaoyisi", "涓嶅ソ鎰忔€? },
++    { "buneng", "涓嶈兘" },
++    { "caidan", "鑿滃崟" },
++    { "chaosong", "鎶勯€? },
++    { "chenggong", "鎴愬姛" },
++    { "chengjiao", "鎴愪氦" },
++    { "chifan", "鍚冮キ" },
++    { "chongdian", "鍏呯數" },
++    { "chongqi", "閲嶅惎" },
++    { "cuowu", "閿欒" },
++    { "daima", "浠ｇ爜" },
++    { "dakai", "鎵撳紑" },
++    { "danshi", "浣嗘槸" },
++    { "dazi", "鎵撳瓧" },
++    { "dengdeng", "绛夌瓑" },
++    { "denglu", "鐧诲綍" },
++    { "dianchi", "鐢垫睜" },
++    { "dianhua", "鐢佃瘽" },
++    { "dianliang", "鐢甸噺" },
++    { "diannao", "鐢佃剳" },
++    { "dianya", "鐢靛帇" },
++    { "dianying", "鐢靛奖" },
++    { "dianzan", "鐐硅禐" },
++    { "diefu", "璺屽箙" },
++    { "duankai", "鏂紑" },
++    { "duibuqi", "瀵逛笉璧? },
++    { "erqie", "鑰屼笖" },
++    { "fangdian", "鏀剧數" },
++    { "fanhui", "杩斿洖" },
++    { "fayan", "鍙戣█" },
++    { "fensi", "绮変笣" },
++    { "fenxiang", "鍒嗕韩" },
++    { "fenzhong", "鍒嗛挓" },
++    { "fumu", "鐖舵瘝" },
++    { "gangbi", "娓竵" },
++    { "ganjin", "璧剁揣" },
++    { "ganxie", "鎰熻阿" },
++    { "gengxin", "鏇存柊" },
++    { "gongzuo", "宸ヤ綔" },
++    { "guanbi", "鍏抽棴" },
++    { "guangzhou", "骞垮窞" },
++    { "guanzhu", "鍏虫敞" },
++    { "gupiao", "鑲＄エ" },
++    { "gupiaoda", "鑲＄エ浠ｇ爜" },
++    { "gushi", "鏁呬簨" },
++    { "guzhang", "鏁呴殰" },
++    { "haipa", "瀹虫€? },
++    { "haishi", "杩樻槸" },
++    { "haizi", "瀛╁瓙" },
++    { "haode", "濂界殑" },
++    { "haoode", "濂界殑" },
++    { "heshui", "鍠濇按" },
++    { "huanshou", "鎹㈡墜" },
++    { "huida", "鍥炵瓟" },
++    { "huifu", "鍥炲" },
++    { "huozhe", "鎴栬€? },
++    { "jiage", "浠锋牸" },
++    { "jiancha", "妫€鏌? },
++    { "jiating", "瀹跺涵" },
++    { "jiebang", "瑙ｇ粦" },
++    { "jieshu", "缁撴潫" },
++    { "jijin", "鍩洪噾" },
++    { "jindu", "杩涘害" },
++    { "jingya", "鎯婅" },
++    { "jingyin", "闈欓煶" },
++    { "jintian", "浠婂ぉ" },
++    { "jiqiren", "鏈哄櫒浜? },
++    { "jixu", "缁х画" },
++    { "kaishi", "寮€濮? },
++    { "kaixin", "寮€蹇? },
++    { "keneng", "鍙兘" },
++    { "keyi", "鍙互" },
++    { "kuaidian", "蹇偣" },
++    { "kuisun", "浜忔崯" },
++    { "laoshi", "鑰佸笀" },
++    { "liangdu", "浜害" },
++    { "lianjie", "杩炴帴" },
++    { "lixian", "绂荤嚎" },
++    { "maichu", "鍗栧嚭" },
++    { "mairu", "涔板叆" },
++    { "manman", "鎱㈡參" },
++    { "mashang", "椹笂" },
++    { "meigu", "缇庤偂" },
++    { "meiguanxi", "娌″叧绯? },
++    { "meiguo", "缇庡浗" },
++    { "meishi", "娌′簨" },
++    { "meiyuan", "缇庡厓" },
++    { "mima", "瀵嗙爜" },
++    { "mingtian", "鏄庡ぉ" },
++    { "muse", "缂柉" },
++    { "nali", "鍝噷" },
++    { "nanguo", "闅捐繃" },
++    { "nanpengyou", "鐢锋湅鍙? },
++    { "nihao", "浣犲ソ" },
++    { "nvpengyou", "濂虫湅鍙? },
++    { "ouyuan", "娆у厓" },
++    { "ouzhou", "娆ф床" },
++    { "pengyou", "鏈嬪弸" },
++    { "pinglun", "璇勮" },
++    { "pingmu", "灞忓箷" },
++    { "qichuang", "璧峰簥" },
++    { "qidong", "鍚姩" },
++    { "qinglang", "鏅存湕" },
++    { "qingqiu", "璇锋眰" },
++    { "qingwen", "璇烽棶" },
++    { "qizi", "濡诲瓙" },
++    { "queren", "纭" },
++    { "quxiao", "鍙栨秷" },
++    { "ranhou", "鐒跺悗" },
++    { "redian", "鐑偣" },
++    { "remen", "鐑棬" },
++    { "renminbi", "浜烘皯甯? },
++    { "rexiao", "鐑攢" },
++    { "riben", "鏃ユ湰" },
++    { "riyuen", "鏃ュ厓" },
++    { "ruguo", "濡傛灉" },
++    { "shanchu", "鍒犻櫎" },
++    { "shangchuan", "涓婁紶" },
++    { "shanghai", "涓婃捣" },
++    { "shangwu", "涓婂崍" },
++    { "shaodeng", "绋嶇瓑" },
++    { "shengji", "鍗囩骇" },
++    { "shengqi", "鐢熸皵" },
++    { "shengyin", "澹伴煶" },
++    { "shenme", "浠€涔? },
++    { "shenzhen", "娣卞湷" },
++    { "shezhi", "璁剧疆" },
++    { "shibai", "澶辫触" },
++    { "shichang", "甯傚満" },
++    { "shipin", "瑙嗛" },
++    { "shizhi", "甯傚€? },
++    { "shoucang", "鏀惰棌" },
++    { "shouji", "鎵嬫満" },
++    { "shuaxin", "鍒锋柊" },
++    { "shuijiao", "鐫¤" },
++    { "sousuo", "鎼滅储" },
++    { "suiran", "铏界劧" },
++    { "suoyi", "鎵€浠? },
++    { "taiwan", "鍙版咕" },
++    { "taoyan", "璁ㄥ帉" },
++    { "tianjia", "娣诲姞" },
++    { "tianqi", "澶╂皵" },
++    { "tingzhi", "鍋滄" },
++    { "tongshi", "鍚屼簨" },
++    { "tongzhi", "閫氱煡" },
++    { "touzi", "鎶曡祫" },
++    { "tuichu", "閫€鍑? },
++    { "tuijian", "鎺ㄨ崘" },
++    { "tupian", "鍥剧墖" },
++    { "wancheng", "瀹屾垚" },
++    { "wangluo", "缃戠粶" },
++    { "wanjia", "鐜╁" },
++    { "wanshang", "鏅氫笂" },
++    { "weishenme", "涓轰粈涔? },
++    { "weixin", "寰俊" },
++    { "weixiu", "缁翠慨" },
++    { "wendu", "娓╁害" },
++    { "wenti", "闂" },
++    { "wenzi", "鏂囧瓧" },
++    { "wifi", "鏃犵嚎" },
++    { "wifii", "鏃犵嚎" },
++    { "wuxian", "鏃犵嚎" },
++    { "xianggang", "棣欐腐" },
++    { "xianjia", "鐜颁环" },
++    { "xianzai", "鐜板湪" },
++    { "xiaohua", "绗戣瘽" },
++    { "xiaoshi", "灏忔椂" },
++    { "xiaoshihou", "灏忔椂鍊? },
++    { "xiaoxi", "娑堟伅" },
++    { "xiaoyu", "涓嬮洦" },
++    { "xiaozhu", "灏忓姪" },
++    { "xiawu", "涓嬪崍" },
++    { "xiazai", "涓嬭浇" },
++    { "xiexie", "璋㈣阿" },
++    { "xihuan", "鍠滄" },
++    { "xingde", "琛岀殑" },
++    { "xingqu", "鍏磋叮" },
++    { "xinwen", "鏂伴椈" },
++    { "xiuxi", "浼戞伅" },
++    { "xuesheng", "瀛︾敓" },
++    { "xuexi", "瀛︿範" },
++    { "yichang", "寮傚父" },
++    { "yichu", "绉婚櫎" },
++    { "yiding", "涓€瀹? },
++    { "yihou", "浠ュ悗" },
++    { "yijing", "宸茬粡" },
++    { "yinggai", "搴旇" },
++    { "yingli", "鐩堝埄" },
++    { "yinliang", "闊抽噺" },
++    { "yinwei", "鍥犱负" },
++    { "yinyue", "闊充箰" },
++    { "yiqian", "浠ュ墠" },
++    { "youhui", "浼樻儬" },
++    { "youxi", "娓告垙" },
++    { "youxian", "鏈夌嚎" },
++    { "yuanjia", "鍘熶环" },
++    { "yundong", "杩愬姩" },
++    { "yuyin", "璇煶" },
++    { "zaijian", "鍐嶈" },
++    { "zaixian", "鍦ㄧ嚎" },
++    { "zaoshang", "鏃╀笂" },
++    { "zenme", "鎬庝箞" },
++    { "zenmeyang", "鎬庝箞鏍? },
++    { "zhangdie", "娑ㄨ穼" },
++    { "zhangfu", "娑ㄥ箙" },
++    { "zhanghao", "璐﹀彿" },
++    { "zhekou", "鎶樻墸" },
++    { "zheli", "杩欓噷" },
++    { "zhengchang", "姝ｅ父" },
++    { "zhengque", "姝ｇ‘" },
++    { "zhengzai", "姝ｅ湪" },
++    { "zhongguo", "涓浗" },
++    { "zhuanfa", "杞彂" },
++    { "zhuli", "鍔╃悊" },
++    { "zhuye", "涓婚〉" },
++    { "zixuan", "鑷€? },
++    { "zuotian", "鏄ㄥぉ" },
++};
++static const int s_words_n = 232;
++
++/* Single-syllable characters. */
++static const muse_py_entry_t s_syl[] = {
++    { "a", "鍟婇樋鍛€" },
++    { "ai", "鐖辩煯鎸ㄧ檶鑹剧" },
++    { "an", "瀹夋寜鏆楁宀? },
++    { "ang", "鏄? },
++    { "ao", "濂ュ偛鐔境琚? },
++    { "ba", "鍚ф妸鍏埜宸寸舰鎷? },
++    { "bai", "鐧界櫨鎽嗚触鎷? },
++    { "ban", "鍗婂姙鑸増鐝澘浼? },
++    { "bang", "甯粦鏃佹姒? },
++    { "bao", "鍖呮姤淇濋ケ瀹濇姳鏆? },
++    { "bei", "琚寳澶囪儗鏉€嶆偛" },
++    { "ben", "鏈绗? },
++    { "bi", "姣斿繀绗旈棴閬块蓟褰? },
++    { "bian", "杈瑰彉渚块亶缂栬京" },
++    { "biao", "琛ㄦ爣褰? },
++    { "bie", "鍒唻" },
++    { "bin", "瀹炬花" },
++    { "bing", "骞剁梾鍏靛啺楗? },
++    { "bo", "娉㈡挱鍗氫集钖勬嫧" },
++    { "bu", "涓嶉儴姝ュ竷琛ユ崟" },
++    { "ca", "鎿? },
++    { "cai", "鎵嶈彍褰╄储閲囩寽" },
++    { "can", "鍙傛畫椁愭儴" },
++    { "cang", "钘忎粨鑻? },
++    { "cao", "鑽夋搷鏇? },
++    { "ce", "娴嬬瓥渚у唽" },
++    { "ceng", "鏇惧眰" },
++    { "cha", "鏌ュ樊鑼舵彃瀵? },
++    { "chai", "鎷嗘煷" },
++    { "chan", "浜х紶绂? },
++    { "chang", "闀垮父鍦哄巶鍞辩晠" },
++    { "chao", "瓒呮湞娼惖鎶? },
++    { "che", "杞﹀交鎾? },
++    { "chen", "闄堟矇鏅ㄥ皹绉? },
++    { "cheng", "鎴愬煄绋嬬О鎵夸箻" },
++    { "chi", "鍚冩寔姹犺繜璧ゅ昂" },
++    { "chong", "鍐查噸鍏呰櫕宕? },
++    { "chou", "鎶芥剚涓戜粐" },
++    { "chu", "鍑哄鍒濋櫎妤氳Е" },
++    { "chuan", "浼犵┛鑸瑰窛涓? },
++    { "chuang", "鍒涚獥搴婇棷" },
++    { "chui", "鍚瑰瀭" },
++    { "chun", "鏄ョ函鍞? },
++    { "ci", "娆℃璇嶅埡纾? },
++    { "cong", "浠庤仾涓? },
++    { "cou", "鍑? },
++    { "cu", "绮椾績" },
++    { "cuan", "绐? },
++    { "cui", "鍌剢缈? },
++    { "cun", "瀛樻潙瀵? },
++    { "cuo", "閿欐帾" },
++    { "da", "澶ф墦杈剧瓟鎼? },
++    { "dai", "甯︿唬寰呰鎴村憜" },
++    { "dan", "浣嗗崟鎷呭脊铔嬭儐娣? },
++    { "dang", "褰撳厷鎸¤崱" },
++    { "dao", "鍒伴亾鍊掑鍒€宀? },
++    { "de", "鐨勫緱寰峰湴" },
++    { "dei", "寰? },
++    { "deng", "绛夌櫥鐏倱" },
++    { "di", "鍦扮浣庡簳婊村紵鏁? },
++    { "dian", "鐐圭數搴楀吀娈垮灚" },
++    { "diao", "璋冩帀鍚婇洉" },
++    { "die", "璺屽彔鐖? },
++    { "ding", "瀹氶《璁竵鐩? },
++    { "diu", "涓? },
++    { "dong", "涓滃姩鎳傚啲娲炲喕" },
++    { "dou", "閮芥枟璞嗛€? },
++    { "du", "閮借搴︾嫭姣掓潨" },
++    { "duan", "娈垫柇鐭" },
++    { "dui", "瀵归槦鍫? },
++    { "dun", "椤跨浘鍚? },
++    { "duo", "澶氭湹澶鸿翰" },
++    { "e", "棰濇伓楗夸縿" },
++    { "en", "鎭? },
++    { "er", "鑰屼簩鍎胯€冲皵" },
++    { "fa", "鍙戞硶缃氫箯" },
++    { "fan", "鍙嶉キ鐑︾炕鍑¤寖" },
++    { "fang", "鏂规斁鎴块槻璁夸豢" },
++    { "fei", "闈為璐硅偉搴? },
++    { "fen", "鍒嗕唤绾风矇濂? },
++    { "feng", "椋庡皝涓板嘲鐤紳" },
++    { "fo", "浣? },
++    { "fou", "鍚? },
++    { "fu", "鏈嶅鐖跺簻浠樺瘜璐熷" },
++    { "ga", "鍢? },
++    { "gai", "璇ユ敼姒傜洊" },
++    { "gan", "骞叉劅鏁㈣刀鐢樻潌" },
++    { "gang", "鍒氶挗娓矖绾? },
++    { "gao", "楂樺憡鎼炵鑶? },
++    { "ge", "涓悇姝屾牸鍝ラ殧" },
++    { "gei", "缁? },
++    { "gen", "璺熸牴" },
++    { "geng", "鏇磋€? },
++    { "gong", "宸ュ叕鍔熷叡渚涘鏀? },
++    { "gou", "澶熺嫍璐矡鏋? },
++    { "gu", "鍙ゆ晠椤捐偂鍥轰及" },
++    { "gua", "鎸傜摐鍒? },
++    { "guai", "鎬箹鎷? },
++    { "guan", "鍏崇瑙傚畼棣嗘儻" },
++    { "guang", "鍏夊箍閫? },
++    { "gui", "璐靛綊楝艰鏌? },
++    { "gun", "婊氭" },
++    { "guo", "杩囧浗鏋滈攨閮? },
++    { "ha", "鍝? },
++    { "hai", "杩樻捣瀹冲鍜? },
++    { "han", "姹夊瘨鍚枈姹楅煩" },
++    { "hang", "琛岃埅鏉? },
++    { "hao", "濂藉彿姣豹鑰? },
++    { "he", "鍜屽悎浣曟渤鍠濇牳鐩? },
++    { "hei", "榛戝樋" },
++    { "hen", "寰堟仺鐥? },
++    { "heng", "妯亽鍝? },
++    { "hong", "绾㈡椽瀹忚桨" },
++    { "hou", "鍚庡€欏帤渚? },
++    { "hu", "鎶ゆ埛婀栦簰鑳″拷" },
++    { "hua", "璇濊姳鍖栫敾鍗庢粦" },
++    { "huai", "鍧忔€€" },
++    { "huan", "杩樻崲娆㈢幆缂撴偅" },
++    { "huang", "榛勭殗鎱屾檭" },
++    { "hui", "浼氬洖鐏拌緣姹囨瘉" },
++    { "hun", "娣峰鏄忛瓊" },
++    { "huo", "鎴栨椿鐏揣鑾? },
++    { "ji", "鏈鸿鍑犲繁璁″強闆嗙骇鎬? },
++    { "jia", "瀹跺姞浠峰亣鏋剁敳" },
++    { "jian", "瑙侀棿浠跺缓绠€鍑忓仴妫€" },
++    { "jiang", "灏嗚姹熼檷濂? },
++    { "jiao", "鍙暀浜よ緝鑴氳瑙? },
++    { "jie", "鎺ヨВ缁撶晫濮愬€熻" },
++    { "jin", "杩涢噾杩戜粖灏界揣浠? },
++    { "jing", "缁忎含绮鹃潤鏅鍑€" },
++    { "jiong", "绐? },
++    { "jiu", "灏变節涔呴厭鏃ф晳" },
++    { "ju", "灏辨嵁鍙ュ眬涓惧叿灞? },
++    { "juan", "鍗峰湀鍊? },
++    { "jue", "瑙夊喅缁濊剼" },
++    { "jun", "鍐涘潎鍚涗繆" },
++    { "ka", "鍗″挅" },
++    { "kai", "寮€鍑シ" },
++    { "kan", "鐪嬬爫鍒婂牚" },
++    { "kang", "搴锋姉鎵? },
++    { "kao", "鑰冮潬鐑? },
++    { "ke", "鍙绉戝厠瀹㈠埢" },
++    { "ken", "鑲伋" },
++    { "keng", "鍧? },
++    { "kong", "绌烘亹鎺у瓟" },
++    { "kou", "鍙ｆ墸" },
++    { "ku", "鑻﹀簱鍝叿" },
++    { "kua", "璺ㄥじ" },
++    { "kuai", "蹇潡浼? },
++    { "kuan", "瀹芥" },
++    { "kuang", "鍐电媯妗嗙熆" },
++    { "kui", "浜忔劎榄? },
++    { "kun", "鍥版槅" },
++    { "kuo", "鎵╅様" },
++    { "la", "鍟︽媺杈ｈ湣" },
++    { "lai", "鏉ヨ禆鑾? },
++    { "lan", "钃濇噿鏍忕儌瑙? },
++    { "lang", "娴儙鏈楃嫾" },
++    { "lao", "鑰佸姵鐗㈡崬" },
++    { "le", "浜嗕箰鍕? },
++    { "lei", "绫荤疮闆锋唱" },
++    { "leng", "鍐锋" },
++    { "li", "閲岀悊鍔涚珛鍒╀緥绂绘潕" },
++    { "lia", "淇? },
++    { "lian", "杩炶仈鑴哥粌鎭嬫€? },
++    { "liang", "涓や寒閲忚壇鍑夌伯" },
++    { "liao", "浜嗘枡鑱婄枟" },
++    { "lie", "鍒楃儓瑁? },
++    { "lin", "鏋椾复閭绘穻" },
++    { "ling", "鍙︿护闆堕鐏? },
++    { "liu", "鍏祦鐣欏垬鏌? },
++    { "long", "榫欏紕闅嗙" },
++    { "lou", "妤奸湶婕忔悅" },
++    { "lu", "璺綍闄嗛瞾鐐夌豢" },
++    { "luan", "涔卞嵉" },
++    { "lue", "鐣? },
++    { "lun", "璁鸿疆浼? },
++    { "luo", "钀界綏娲涚粶" },
++    { "lv", "缁挎梾寰嬬巼铏戦摑" },
++    { "ma", "鍚楀椹獋楹荤爜" },
++    { "mai", "涔板崠楹﹁繄" },
++    { "man", "婊℃參婕洰" },
++    { "mang", "蹇欑洸鑺? },
++    { "mao", "姣涘啋甯界尗璨? },
++    { "me", "涔? },
++    { "mei", "娌℃瘡缇庢濡瑰獟" },
++    { "men", "浠棬闂? },
++    { "meng", "姊︾寷钂欑洘" },
++    { "mi", "绫冲瘑杩风铚? },
++    { "mian", "闈㈠厤妫夌湢" },
++    { "miao", "绉掑鎻忚嫍" },
++    { "mie", "鐏攽" },
++    { "min", "姘戞晱" },
++    { "ming", "鏄庡悕鍛介福" },
++    { "miu", "璋? },
++    { "mo", "涔堟ā鑾湯鎽稿ⅷ" },
++    { "mou", "鏌愯皨" },
++    { "mu", "鐩瘝鏈ㄤ憨骞曟厱" },
++    { "na", "閭ｆ嬁鍝撼濞? },
++    { "nai", "涔冨ザ鑰? },
++    { "nan", "闅惧崡鐢? },
++    { "nang", "鍥? },
++    { "nao", "鑴戦椆鎭? },
++    { "ne", "鍛? },
++    { "nei", "鍐呴偅" },
++    { "nen", "瀚? },
++    { "neng", "鑳? },
++    { "ni", "浣犲凹娉ラ€嗘嫙" },
++    { "nian", "骞村康绮? },
++    { "niang", "濞橀吙" },
++    { "niao", "楦熷翱" },
++    { "nie", "鎹忚亗" },
++    { "nin", "鎮? },
++    { "ning", "瀹佸嚌" },
++    { "niu", "鐗涚航鎵? },
++    { "nong", "鍐滃紕娴? },
++    { "nu", "濂冲姫鎬? },
++    { "nuan", "鏆? },
++    { "nue", "铏? },
++    { "nuo", "璇烘尓" },
++    { "nv", "濂? },
++    { "o", "鍝﹀枖鍣? },
++    { "ou", "娆у伓鍛? },
++    { "pa", "鎬曠埇甯? },
++    { "pai", "娲炬帓鎷嶇墝" },
++    { "pan", "鐩樺垽鐩煎彌" },
++    { "pang", "鏃佽儢搴? },
++    { "pao", "璺戠偖娉℃姏" },
++    { "pei", "閰嶉櫔鍩逛僵" },
++    { "pen", "鍠风泦" },
++    { "peng", "鏈嬬楣忔崸" },
++    { "pi", "鎵圭毊鐤插尮杈? },
++    { "pian", "鐗囧亸楠楃瘒" },
++    { "piao", "绁ㄩ婕? },
++    { "pie", "鎾? },
++    { "pin", "鍝佽传鎷奸" },
++    { "ping", "骞宠瘎鍑摱灞? },
++    { "po", "鐮村潯棰囧﹩杩? },
++    { "pou", "鍓? },
++    { "pu", "鏅摵鎵戜粏" },
++    { "qi", "璧峰叾姘旀湡涓冨櫒濂囬綈" },
++    { "qia", "鎭板崱" },
++    { "qian", "鍓嶉挶鍗冪娴呮瑺" },
++    { "qiang", "寮哄鎶㈡灙" },
++    { "qiao", "妗ュ阀鎮勬暡涔? },
++    { "qie", "涓斿垏绐? },
++    { "qin", "浜蹭镜鍕ょ惔" },
++    { "qing", "璇锋儏娓呴潚杞诲簡" },
++    { "qiong", "绌风惣" },
++    { "qiu", "姹傜悆绉嬩粐" },
++    { "qu", "鍘诲彇鍖烘洸瓒? },
++    { "quan", "鍏ㄦ潈娉夊湀鍔? },
++    { "que", "鍗寸‘缂洪泙" },
++    { "qun", "缇よ" },
++    { "ran", "鐒舵煋鐕? },
++    { "rang", "璁╁毞" },
++    { "rao", "缁曟壈" },
++    { "re", "鐑児" },
++    { "ren", "浜鸿浠诲繊浠? },
++    { "reng", "浠嶆墧" },
++    { "ri", "鏃? },
++    { "rong", "瀹硅崳铻嶆憾" },
++    { "rou", "鑲夋煍" },
++    { "ru", "濡傚叆涔冲剴" },
++    { "ruan", "杞? },
++    { "rui", "鐟為攼" },
++    { "run", "娑? },
++    { "ruo", "鑻ュ急" },
++    { "sa", "钀ㄦ拻娲? },
++    { "sai", "璧涘" },
++    { "san", "涓夋暎浼? },
++    { "sang", "妗戜抚" },
++    { "sao", "鎵獨" },
++    { "se", "鑹叉订" },
++    { "sen", "妫? },
++    { "seng", "鍍? },
++    { "sha", "鍟ユ矙鏉€鍌荤罕" },
++    { "shai", "鏅掔瓫" },
++    { "shan", "灞卞杽闂垹琛? },
++    { "shang", "涓婂晢浼ゅ皻璧? },
++    { "shao", "灏戠粛鐑х◢鍕? },
++    { "she", "绀捐鑸嶅皠娑? },
++    { "shei", "璋? },
++    { "shen", "浠€韬繁绁炵敋浼? },
++    { "sheng", "鐢熷０鐪佸崌鑳滃湥" },
++    { "shi", "鏄椂鍗佷簨浣垮競瀹炶瘑" },
++    { "shou", "鎵嬪彈鏀堕瀹堝" },
++    { "shu", "涔︽暟鏍戝睘杈撶啛鏈? },
++    { "shua", "鍒疯€? },
++    { "shuai", "甯呮憯琛? },
++    { "shuan", "鏍? },
++    { "shuang", "鍙岀埥" },
++    { "shui", "璋佹按鐫＄◣" },
++    { "shun", "椤虹灛" },
++    { "shuo", "璇寸" },
++    { "si", "鍥涙鎬濆徃浼肩" },
++    { "song", "閫佹澗瀹嬮" },
++    { "sou", "鎼滆墭" },
++    { "su", "閫熻瘔绱犺嫃瀹? },
++    { "suan", "绠楅吀钂? },
++    { "sui", "闅忓瞾纰庤櫧" },
++    { "sun", "瀛欐崯" },
++    { "suo", "鎵€閿佺缉绱? },
++    { "ta", "浠栧ス瀹冨韪? },
++    { "tai", "澶彴鎬佹姮娉? },
++    { "tan", "璋堝脊鎺㈠徆璐? },
++    { "tang", "鍞愬爞姹ょ硸韬? },
++    { "tao", "濂楅€冩璁ㄦ窐" },
++    { "te", "鐗? },
++    { "tei", "蹇? },
++    { "teng", "鐤艰吘" },
++    { "ti", "浣撴彁棰樻浛姊涪" },
++    { "tian", "澶╃敯鐢滃～娣? },
++    { "tiao", "鏉¤皟璺虫寫" },
++    { "tie", "璐撮搧" },
++    { "ting", "鍚仠搴尯" },
++    { "tong", "鍚岄€氱粺鐥涚閾? },
++    { "tou", "澶存姇閫忓伔" },
++    { "tu", "鍥惧湡绐侀€斿緬" },
++    { "tuan", "鍥? },
++    { "tui", "閫€鎺ㄨ吙" },
++    { "tun", "鍚炲悲" },
++    { "tuo", "鎵樿劚濡ユ嫋" },
++    { "wa", "鐡︽寲鍝囪洐" },
++    { "wai", "澶栨" },
++    { "wan", "瀹屼竾鏅氱鐜╁集" },
++    { "wang", "寰€缃戠帇蹇樻湜浜? },
++    { "wei", "涓轰綅鏈崼寰洿浼? },
++    { "wen", "闂枃闂绘俯绋? },
++    { "weng", "缈佸棥" },
++    { "wo", "鎴戞彙鍗ф矁" },
++    { "wu", "鏃犱簲鐗╁姟姝﹁灞? },
++    { "xi", "瑗跨郴鍠滄伅甯岀粏涔? },
++    { "xia", "涓嬪鍚撲緺鐙? },
++    { "xian", "鍏堢幇绾挎樉闄愬幙" },
++    { "xiang", "鎯冲悜鐩搁鍍忓搷椤? },
++    { "xiao", "灏忕瑧鏍℃秷鏁堟檽" },
++    { "xie", "浜涘啓璋㈠崗闉嬫枩" },
++    { "xin", "鏂板績淇℃杈? },
++    { "xing", "琛屾€ф槦鍏村舰骞? },
++    { "xiong", "鍏勯泟鑳稿嚩" },
++    { "xiu", "淇紤绉€琚? },
++    { "xu", "闇€瑕佽缁櫄缁? },
++    { "xuan", "閫夊鏃嬫偓" },
++    { "xue", "瀛﹁闆┐" },
++    { "xun", "瀵昏杩呰寰? },
++    { "ya", "鍛€鍘嬬墮浜氶泤楦? },
++    { "yan", "鐪艰█鐮斾弗婕旈獙鐑? },
++    { "yang", "鏍烽槼鏉ㄥ吇娲嬫壃" },
++    { "yao", "瑕佽嵂鎽囪叞鍜仴" },
++    { "ye", "涔熶笟澶滃彾椤甸噹" },
++    { "yi", "涓€浠ュ凡鎰忎箟鏄撹。渚? },
++    { "yin", "鍥犻煶閾跺紩鍗伴槾" },
++    { "ying", "搴斿奖鑻辫惀杩庣‖" },
++    { "yo", "鍝? },
++    { "yong", "鐢ㄦ案鍕囨嫢娉冲焊" },
++    { "you", "鏈夊張鐢卞弸濂藉彸娌? },
++    { "yu", "涓庝簬璇洦浣欓楸? },
++    { "yuan", "鍘熻繙鍏冮櫌鍛樻効鍦? },
++    { "yue", "鏈堣秺绾︿箰闃? },
++    { "yun", "浜戣繍鍛樺厑鏅? },
++    { "za", "鏉傜牳" },
++    { "zai", "鍦ㄥ啀杞界伨" },
++    { "zan", "鍜辫禐鏆? },
++    { "zang", "鑴忚棌" },
++    { "zao", "鏃╅€犻伃绯熸尽" },
++    { "ze", "鍒欒矗鎷╂辰" },
++    { "zei", "璐? },
++    { "zen", "鎬? },
++    { "zeng", "澧炴浘璧? },
++    { "zha", "鐐告墡鐪ㄨ瘓" },
++    { "zhai", "鎽樼獎鍊? },
++    { "zhan", "绔欐垬灞曞崰娌? },
++    { "zhang", "闀垮紶鎺屾定绔犲笎" },
++    { "zhao", "鎵剧収鎷涚潃璧? },
++    { "zhe", "杩欑潃鑰呮姌鍝? },
++    { "zhei", "杩? },
++    { "zhen", "鐪熼拡闃甸渿闀? },
++    { "zheng", "姝ｆ暣鏀夸簤璇佸緛" },
++    { "zhi", "鍙煡涔嬬洿绾歌嚦鍒舵寚" },
++    { "zhong", "涓閲嶄紬缁堥挓" },
++    { "zhou", "鍛ㄥ窞娲茶垷鏄? },
++    { "zhu", "涓讳綇娉ㄥ姪鐚閫? },
++    { "zhua", "鎶撶埅" },
++    { "zhuai", "鎷? },
++    { "zhuan", "杞笓浼犵爾" },
++    { "zhuang", "瑁呯姸澹挒搴? },
++    { "zhui", "杩藉潬" },
++    { "zhun", "鍑? },
++    { "zhuo", "妗岀潃鎹夋祳" },
++    { "zi", "瀛愯嚜瀛楄祫绱? },
++    { "zong", "鎬诲畻缁肩旱" },
++    { "zou", "璧板" },
++    { "zu", "缁勮冻鏃忕闃? },
++    { "zuan", "閽? },
++    { "zui", "鏈€鍢寸姜閱? },
++    { "zun", "灏婇伒" },
++    { "zuo", "鍋氫綔鍧愬乏鏄ㄥ骇" },
++};
++static const int s_syl_n = 398;
++
++
++static int utf8_char_len(unsigned char c)
++{
++    if (c < 0x80) return 1;
++    if ((c & 0xE0) == 0xC0) return 2;
++    if ((c & 0xF0) == 0xE0) return 3;
++    if ((c & 0xF8) == 0xF0) return 4;
++    return 1;
++}
++
++static int push_cand(const char **out, int n, int max, const char *s, int nbytes)
++{
++    if (n >= max || nbytes <= 0) return n;
++    /* Skip duplicates already in out (compare nbytes). */
++    for (int i = 0; i < n; i++) {
++        if ((int)strlen(out[i]) == nbytes && memcmp(out[i], s, (size_t)nbytes) == 0) {
++            return n;
++        }
++    }
++    /* Caller must keep storage; we return pointers into dict strings.
++     * For multi-byte slices we need stable C strings 鈥?words are whole;
++     * for chars we point into cands with a trick: only return full words
++     * or we copy into static slots. */
++    (void)s;
++    return n;
++}
++
++/* Stable slots for single-char candidates sliced from dict strings. */
++#define SLOT_MAX 48
++#define SLOT_BYTES 8
++static char s_slots[SLOT_MAX][SLOT_BYTES];
++static int s_slot_i;
++
++static const char *slot_copy(const char *s, int nbytes)
++{
++    if (nbytes <= 0 || nbytes >= SLOT_BYTES) return NULL;
++    if (s_slot_i >= SLOT_MAX) s_slot_i = 0;
++    char *d = s_slots[s_slot_i++];
++    memcpy(d, s, (size_t)nbytes);
++    d[nbytes] = 0;
++    return d;
++}
++
++static int already(const char **out, int n, const char *s)
++{
++    for (int i = 0; i < n; i++) {
++        if (strcmp(out[i], s) == 0) return 1;
++    }
++    return 0;
++}
++
++int muse_pinyin_lookup(const char *py, const char **out, int max)
++{
++    if (!py || !py[0] || !out || max <= 0) return 0;
++    int n = 0;
++    s_slot_i = 0;
++    size_t plen = strlen(py);
++
++    /* 1) Words: exact match first, then prefix (py is prefix of word key OR word key is prefix of py). */
++    for (int i = 0; i < s_words_n && n < max; i++) {
++        const char *k = s_words[i].py;
++        size_t klen = strlen(k);
++        if (klen == plen && strcmp(k, py) == 0) {
++            if (!already(out, n, s_words[i].cands)) out[n++] = s_words[i].cands;
++        }
++    }
++    for (int i = 0; i < s_words_n && n < max; i++) {
++        const char *k = s_words[i].py;
++        size_t klen = strlen(k);
++        if (klen > plen && strncmp(k, py, plen) == 0) {
++            if (!already(out, n, s_words[i].cands)) out[n++] = s_words[i].cands;
++        }
++    }
++    /* Word key fully consumed as prefix of typed py (e.g. nihaoXX) 鈥?skip, syllable path handles rest */
++
++    /* 2) Syllables: exact, then py is prefix of syllable (partial), then syllable is prefix of py. */
++    for (int i = 0; i < s_syl_n && n < max; i++) {
++        const char *k = s_syl[i].py;
++        if (strcmp(k, py) != 0) continue;
++        const char *c = s_syl[i].cands;
++        while (*c && n < max) {
++            int cl = utf8_char_len((unsigned char)*c);
++            const char *s = slot_copy(c, cl);
++            if (s && !already(out, n, s)) out[n++] = s;
++            c += cl;
++        }
++    }
++    if (n == 0) {
++        for (int i = 0; i < s_syl_n && n < max; i++) {
++            const char *k = s_syl[i].py;
++            size_t klen = strlen(k);
++            if (klen > plen && strncmp(k, py, plen) == 0) {
++                const char *c = s_syl[i].cands;
++                while (*c && n < max) {
++                    int cl = utf8_char_len((unsigned char)*c);
++                    const char *s = slot_copy(c, cl);
++                    if (s && !already(out, n, s)) out[n++] = s;
++                    c += cl;
++                }
++            }
++        }
++    }
++    /* If typed py starts with a complete syllable, also offer that syllable's chars. */
++    if (n < max) {
++        for (int i = 0; i < s_syl_n && n < max; i++) {
++            const char *k = s_syl[i].py;
++            size_t klen = strlen(k);
++            if (klen < plen && strncmp(py, k, klen) == 0) {
++                /* only if next char could start a new syllable 鈥?always offer */
++                const char *c = s_syl[i].cands;
++                int first = 1;
++                while (*c && n < max && first) {
++                    int cl = utf8_char_len((unsigned char)*c);
++                    const char *s = slot_copy(c, cl);
++                    if (s && !already(out, n, s)) out[n++] = s;
++                    c += cl;
++                    first = 0; /* only first char for prefix-of-py to avoid noise */
++                }
++            }
++        }
++    }
++    (void)push_cand;
++    return n;
++}
++
+diff --git a/esp32/components/muse/muse_pinyin.h b/esp32/components/muse/muse_pinyin.h
+new file mode 100644
+index 0000000..525f1d8
+--- /dev/null
++++ b/esp32/components/muse/muse_pinyin.h
+@@ -0,0 +1,12 @@
++#pragma once
++#include <stddef.h>
++#ifdef __cplusplus
++extern "C" {
++#endif
++/* Look up toneless pinyin `py`. Fills up to `max` candidate UTF-8 strings
++ * (pointers valid until the next call). Returns the count. Everyday + Muse
++ * gadget vocabulary; not a full IME lexicon. */
++int muse_pinyin_lookup(const char *py, const char **out, int max);
++#ifdef __cplusplus
++}
++#endif
+diff --git a/esp32/components/muse/muse_settings_ui.c b/esp32/components/muse/muse_settings_ui.c
+index 01d294b..73a0e9d 100644
+--- a/esp32/components/muse/muse_settings_ui.c
++++ b/esp32/components/muse/muse_settings_ui.c
+@@ -38,6 +38,11 @@
+ #include "muse_ui.h"
+ #include "muse_voice.h"
+ #include "muse_wifi.h"
++#include "muse_ota.h"
++
++#if CONFIG_MUSE_CJK_FONT
++LV_FONT_DECLARE(muse_font_cjk_16)
++#endif
+ 
+ /* Keep content in a column that stays inside a round panel (and fits a 368 px one). */
+ #define LIST_W 330
+@@ -60,7 +65,7 @@ typedef void (*text_done_cb_t)(const char *text);
+ static int s_text_scale = 466;
+ static lv_obj_t *s_tile;
+ static lv_obj_t *s_current;
+-static lv_obj_t *s_home, *s_wifi, *s_hatch, *s_ble, *s_sound, *s_sleep, *s_battery, *s_power, *s_text;
++static lv_obj_t *s_home, *s_wifi, *s_hatch, *s_ble, *s_sound, *s_sleep, *s_battery, *s_power, *s_update, *s_text;
+ 
+ /*
+  * Only home is kept. A sub-page is built when it opens and deleted on the way
+@@ -73,7 +78,7 @@ typedef struct {
+ } page_t;
+ 
+ /* Home values. */
+-static lv_obj_t *s_home_wifi, *s_home_hatch, *s_home_ble, *s_home_sound, *s_home_sleep, *s_home_battery, *s_about;
++static lv_obj_t *s_home_wifi, *s_home_hatch, *s_home_ble, *s_home_sound, *s_home_sleep, *s_home_battery, *s_home_update, *s_about;
+ 
+ /* Wi-Fi page. */
+ static lv_obj_t *s_wifi_sw, *s_wifi_status, *s_wifi_saved, *s_wifi_scan_btn, *s_wifi_scan_lbl, *s_wifi_list;
+@@ -108,6 +113,13 @@ static lv_obj_t *s_batt_status, *s_batt_level, *s_batt_drain, *s_batt_full, *s_b
+     *s_batt_busy, *s_batt_awake;
+ static int64_t s_batt_shown_us;
+ 
++/* Update / OTA page. */
++static lv_obj_t *s_upd_status, *s_upd_detail, *s_upd_check_lbl, *s_upd_confirm_btn, *s_upd_confirm_lbl;
++static lv_obj_t *s_upd_bar, *s_upd_pct;
++static muse_ota_check_state_t s_upd_shown = (muse_ota_check_state_t)-1;
++static bool s_upd_applying;
++static int s_upd_last_pct = -1;
++
+ /* Text entry page. */
+ static lv_obj_t *s_text_title, *s_text_ta;
+ static lv_obj_t *s_text_kp;                 /* a screen under 2" */
+@@ -139,6 +151,49 @@ static void set_text(lv_obj_t *l, const char *text)
+     }
+ }
+ 
++
++#if CONFIG_MUSE_CJK_FONT
++/* Montserrat for Latin + Unifont CJK fallback so 妫€鏌ユ洿鏂?etc. render. */
++static const lv_font_t *ui_cjk_font(void)
++{
++    static lv_font_t font;
++    static bool ready;
++    if (!ready) {
++        font = lv_font_montserrat_16;
++        font.fallback = &muse_font_cjk_16;
++        ready = true;
++    }
++    return &font;
++}
++
++static const lv_font_t *ui_cjk_font_lg(void)
++{
++    static lv_font_t font;
++    static bool ready;
++    if (!ready) {
++        font = lv_font_montserrat_20;
++        font.fallback = &muse_font_cjk_16;
++        ready = true;
++    }
++    return &font;
++}
++
++static void set_text_cjk(lv_obj_t *l, const char *text)
++{
++    if (!l || !text) {
++        return;
++    }
++    if (strcmp(lv_label_get_text(l), text) != 0) {
++        lv_label_set_text(l, text);
++    }
++}
++#else
++static const lv_font_t *ui_cjk_font(void) { return &lv_font_montserrat_16; }
++static const lv_font_t *ui_cjk_font_lg(void) { return &lv_font_montserrat_20; }
++static void set_text_cjk(lv_obj_t *l, const char *text) { set_text(l, text); }
++#endif
++
++
+ static lv_obj_t *note(lv_obj_t *list, const char *text)
+ {
+     lv_obj_t *l = label(list, &lv_font_montserrat_16, COLOR_DIM, text);
+@@ -359,7 +414,7 @@ static lv_obj_t *info_row(lv_obj_t *list, const char *text)
+ 
+ static void drop(lv_obj_t *p)
+ {
+-    lv_obj_t **const pages[] = { &s_wifi, &s_hatch, &s_ble, &s_sound, &s_sleep, &s_battery, &s_power, &s_text };
++    lv_obj_t **const pages[] = { &s_wifi, &s_hatch, &s_ble, &s_sound, &s_sleep, &s_battery, &s_power, &s_update, &s_text };
+     for (size_t i = 0; i < sizeof(pages) / sizeof(pages[0]); i++) {
+         if (*pages[i] == p) {
+             *pages[i] = NULL;
+@@ -429,6 +484,19 @@ static int text_y(int y)
+ static void close_text(void)
+ {
+     lv_textarea_set_text(s_text_ta, "");   /* don't leave secrets in the widget */
++    if (!s_text_back) {
++        /* Opened from the Muse face: restore settings home underneath, then face. */
++        if (s_text) {
++            lv_obj_add_flag(s_text, LV_OBJ_FLAG_HIDDEN);
++        }
++        if (s_home) {
++            lv_obj_remove_flag(s_home, LV_OBJ_FLAG_HIDDEN);
++            s_current = s_home;
++            muse_ui_set_swipe_enabled(true);
++        }
++        muse_ui_show_face();
++        return;
++    }
+     show(s_text_back);
+ }
+ 
+@@ -564,8 +632,7 @@ static void build_text_page(lv_obj_t *tile)
+     lv_obj_align(back, LV_ALIGN_TOP_MID, -text_px(140), text_y(44));
+     s_text_kp = muse_keypad_create(s_text, s_text_ta, muse_board->round);
+     int top = text_y(98);
+-    lv_obj_set_size(s_text_kp, muse_board->width, muse_board->height - top);
+-    lv_obj_align(s_text_kp, LV_ALIGN_TOP_MID, 0, top);
++    muse_keypad_layout(s_text_kp, top, muse_board->width, muse_board->height - top);
+     if (muse_board->round) {
+         /* Lifts the bottom row's labels inside the circle. The button matrix
+          * stretches edge keys' taps over padding up to LV_DPI_DEF / 10, and not
+@@ -1211,6 +1278,219 @@ static void tick_battery(void)
+     set_text(s_batt_awake, buf);
+ }
+ 
++
++/* ---------- Update (OTA check) ---------- */
++
++static void on_ota_apply_done(const muse_ota_apply_event_t *ev, void *user)
++{
++    (void)user;
++    s_upd_applying = false;
++    s_upd_last_pct = -1;
++    muse_state_set_progress(0);
++    if (s_upd_bar) {
++        lv_obj_add_flag(s_upd_bar, LV_OBJ_FLAG_HIDDEN);
++    }
++    if (s_upd_pct) {
++        lv_obj_add_flag(s_upd_pct, LV_OBJ_FLAG_HIDDEN);
++    }
++    if (!ev) {
++        return;
++    }
++    if (ev->result == MUSE_OTA_APPLIED) {
++        if (s_upd_status) {
++            set_text_cjk(s_upd_status, "鍗囩骇鎴愬姛锛屾鍦ㄩ噸鍚€?);
++        }
++        muse_state_set_caption("OTA OK, rebooting");
++    } else if (ev->result == MUSE_OTA_SKIPPED) {
++        if (s_upd_status) {
++            set_text_cjk(s_upd_status, "宸茶烦杩囷紙鐗堟湰鏈洿鏂帮級");
++        }
++    } else {
++        char buf[128];
++        snprintf(buf, sizeof(buf), "鍗囩骇澶辫触锛?.80s", ev->detail ? ev->detail : "?");
++        if (s_upd_status) {
++            set_text_cjk(s_upd_status, buf);
++        }
++        muse_state_set_caption("OTA failed");
++    }
++    s_upd_shown = (muse_ota_check_state_t)-1;
++}
++
++static void on_update_check(lv_event_t *e)
++{
++    (void)e;
++    if (s_upd_applying) {
++        return;
++    }
++    muse_ota_check_start();
++    s_upd_shown = (muse_ota_check_state_t)-1;
++}
++
++static void on_update_confirm(lv_event_t *e)
++{
++    (void)e;
++    if (s_upd_applying) {
++        return;
++    }
++    muse_ota_check_info_t info;
++    muse_ota_check_get(&info);
++    if (info.state != MUSE_OTA_CHECK_UPDATE || !info.url[0]) {
++        return;
++    }
++    s_upd_applying = true;
++    s_upd_last_pct = -1;
++    if (s_upd_status) {
++        set_text_cjk(s_upd_status, "姝ｅ湪涓嬭浇鍗囩骇锛岃鍕挎柇鐢碘€?);
++    }
++    if (s_upd_bar) {
++        lv_bar_set_value(s_upd_bar, 0, LV_ANIM_OFF);
++        lv_obj_remove_flag(s_upd_bar, LV_OBJ_FLAG_HIDDEN);
++    }
++    if (s_upd_pct) {
++        set_text(s_upd_pct, "0%");
++        lv_obj_remove_flag(s_upd_pct, LV_OBJ_FLAG_HIDDEN);
++    }
++    if (s_upd_detail) {
++        char buf[128];
++        snprintf(buf, sizeof(buf), "%s 鈫?%s", info.running, info.remote);
++        set_text_cjk(s_upd_detail, buf);
++    }
++    if (s_upd_confirm_btn) {
++        lv_obj_add_flag(s_upd_confirm_btn, LV_OBJ_FLAG_HIDDEN);
++    }
++    muse_state_set_caption("OTA downloading鈥?);
++    /* force=false: ota_start still gates on embedded image version. */
++    muse_ota_apply(info.url, false, on_ota_apply_done, NULL);
++}
++
++static void build_update_page(lv_obj_t *tile)
++{
++    lv_obj_t *list;
++    s_update = page(tile, "UPDATE", true, &list);
++    /* Title above is ASCII-safe via showable; replace with CJK after create. */
++    lv_obj_t *title = lv_obj_get_child(s_update, 0);
++    if (title && lv_obj_check_type(title, &lv_label_class)) {
++        lv_obj_set_style_text_font(title, ui_cjk_font_lg(), 0);
++        lv_label_set_text(title, "妫€鏌ユ洿鏂?);
++    }
++    s_upd_status = note(list, "");
++    lv_obj_set_style_text_font(s_upd_status, ui_cjk_font(), 0);
++    s_upd_detail = note(list, "");
++    lv_obj_set_style_text_font(s_upd_detail, ui_cjk_font(), 0);
++    s_upd_bar = lv_bar_create(list);
++    lv_obj_set_size(s_upd_bar, lv_pct(90), 14);
++    lv_bar_set_range(s_upd_bar, 0, 100);
++    lv_bar_set_value(s_upd_bar, 0, LV_ANIM_OFF);
++    lv_obj_set_style_bg_color(s_upd_bar, lv_color_hex(0x2a2345), LV_PART_MAIN);
++    lv_obj_set_style_bg_color(s_upd_bar, lv_color_hex(COLOR_ACCENT), LV_PART_INDICATOR);
++    lv_obj_set_style_radius(s_upd_bar, 7, LV_PART_MAIN);
++    lv_obj_set_style_radius(s_upd_bar, 7, LV_PART_INDICATOR);
++    lv_obj_add_flag(s_upd_bar, LV_OBJ_FLAG_HIDDEN);
++    s_upd_pct = note(list, "0%");
++    lv_obj_add_flag(s_upd_pct, LV_OBJ_FLAG_HIDDEN);
++    button(list, "Check", COLOR_ACCENT, on_update_check, &s_upd_check_lbl);
++    if (s_upd_check_lbl) {
++        lv_obj_set_style_text_font(s_upd_check_lbl, ui_cjk_font_lg(), 0);
++        set_text_cjk(s_upd_check_lbl, "妫€鏌ユ洿鏂?);
++    }
++    s_upd_confirm_btn = button(list, "Upgrade", COLOR_WARN, on_update_confirm, &s_upd_confirm_lbl);
++    if (s_upd_confirm_lbl) {
++        lv_obj_set_style_text_font(s_upd_confirm_lbl, ui_cjk_font_lg(), 0);
++        set_text_cjk(s_upd_confirm_lbl, "纭鍗囩骇");
++    }
++    lv_obj_add_flag(s_upd_confirm_btn, LV_OBJ_FLAG_HIDDEN);
++    s_upd_shown = (muse_ota_check_state_t)-1;
++    s_upd_applying = false;
++}
++
++static void tick_update(void)
++{
++    if (s_upd_applying) {
++        int pct = muse_ota_progress_percent();
++        if (pct < 0) {
++            pct = 0;
++        }
++        if (pct != s_upd_last_pct) {
++            s_upd_last_pct = pct;
++            if (s_upd_bar) {
++                lv_bar_set_value(s_upd_bar, pct, LV_ANIM_ON);
++            }
++            if (s_upd_pct) {
++                char buf[16];
++                snprintf(buf, sizeof(buf), "%d%%", pct);
++                set_text(s_upd_pct, buf);
++            }
++            if (s_upd_status) {
++                char msg[64];
++                if (pct >= 100) {
++                    snprintf(msg, sizeof(msg), "姝ｅ湪鏍￠獙骞跺啓鍏モ€?);
++                } else if (pct >= 10) {
++                    snprintf(msg, sizeof(msg), "姝ｅ湪涓嬭浇 %d%%锛岃鍕挎柇鐢?, pct);
++                } else {
++                    snprintf(msg, sizeof(msg), "姝ｅ湪涓嬭浇鍗囩骇锛岃鍕挎柇鐢碘€?);
++                }
++                set_text_cjk(s_upd_status, msg);
++            }
++            muse_state_set_progress(pct / 100.0f);
++        }
++        return;
++    }
++    muse_ota_check_info_t info;
++    muse_ota_check_get(&info);
++    if (info.state == s_upd_shown) {
++        return;
++    }
++    s_upd_shown = info.state;
++    char detail[192];
++    detail[0] = '\0';
++    switch (info.state) {
++    case MUSE_OTA_CHECK_IDLE:
++        set_text_cjk(s_upd_status, "鐐逛笅鏂规鏌ユ湇鍔″櫒鍥轰欢鐗堟湰");
++        snprintf(detail, sizeof(detail), "褰撳墠 %s", info.running[0] ? info.running : "?");
++        lv_obj_add_flag(s_upd_confirm_btn, LV_OBJ_FLAG_HIDDEN);
++        break;
++    case MUSE_OTA_CHECK_BUSY:
++        set_text_cjk(s_upd_status, "姝ｅ湪妫€鏌モ€?);
++        snprintf(detail, sizeof(detail), "褰撳墠 %s", info.running);
++        lv_obj_add_flag(s_upd_confirm_btn, LV_OBJ_FLAG_HIDDEN);
++        break;
++    case MUSE_OTA_CHECK_LATEST:
++        set_text_cjk(s_upd_status, "宸叉槸鏈€鏂?);
++        snprintf(detail, sizeof(detail), "褰撳墠 %s", info.running);
++        lv_obj_add_flag(s_upd_confirm_btn, LV_OBJ_FLAG_HIDDEN);
++        break;
++    case MUSE_OTA_CHECK_UPDATE:
++        {
++            char msg[128];
++            snprintf(msg, sizeof(msg), "鍙戠幇鏂扮増鏈?%.40s锛岀‘璁ゅ崌绾э紵", info.remote);
++            set_text_cjk(s_upd_status, msg);
++            if (info.notes[0]) {
++                snprintf(detail, sizeof(detail), "%s -> %s\n%.80s", info.running, info.remote, info.notes);
++            } else if (info.size > 0) {
++                snprintf(detail, sizeof(detail), "%s -> %s (%lld KB)", info.running, info.remote,
++                         (long long)(info.size / 1024));
++            } else {
++                snprintf(detail, sizeof(detail), "%s -> %s", info.running, info.remote);
++            }
++            set_text_cjk(s_upd_confirm_lbl, "纭鍗囩骇");
++            lv_obj_remove_flag(s_upd_confirm_btn, LV_OBJ_FLAG_HIDDEN);
++        }
++        break;
++    case MUSE_OTA_CHECK_ERROR:
++    default:
++        {
++            char msg[128];
++            snprintf(msg, sizeof(msg), "妫€鏌ュけ璐ワ細%.80s", info.error[0] ? info.error : "?");
++            set_text_cjk(s_upd_status, msg);
++            snprintf(detail, sizeof(detail), "褰撳墠 %s", info.running);
++            lv_obj_add_flag(s_upd_confirm_btn, LV_OBJ_FLAG_HIDDEN);
++        }
++        break;
++    }
++    set_text_cjk(s_upd_detail, detail);
++}
++
++
+ /* ---------- Power ---------- */
+ 
+ static void on_power_off(lv_event_t *e)
+@@ -1238,6 +1518,40 @@ static void build_power_page(lv_obj_t *tile)
+ 
+ /* ---------- Home ---------- */
+ 
++
++#if CONFIG_MUSE_HATCH
++static void on_type_done(const char *text)
++{
++    if (!text || !text[0]) {
++        return;
++    }
++    char *copy = strdup(text);
++    if (!copy) {
++        muse_state_set_caption("OUT OF MEMORY");
++        return;
++    }
++    /* Voice task owns `copy` and drives the reply (captions + TTS). */
++    muse_voice_send_text(copy);
++}
++
++void muse_settings_ui_open_type(void)
++{
++    muse_ui_show_settings();
++    open_text("Message", "", false, 280, "Type to Muse", on_type_done, NULL);
++#if CONFIG_MUSE_CJK_FONT
++    if (s_text_title) {
++        lv_obj_set_style_text_font(s_text_title, ui_cjk_font_lg(), 0);
++        set_text_cjk(s_text_title, "鎵撳瓧鍙?Muse");
++    }
++    if (s_text_ta) {
++        lv_obj_set_style_text_font(s_text_ta, ui_cjk_font_lg(), 0);
++    }
++#endif
++}
++#else
++void muse_settings_ui_open_type(void) {}
++#endif
++
+ static const page_t WIFI = { &s_wifi, build_wifi_page };
+ static const page_t HATCH = { &s_hatch, build_hatch_page };
+ static const page_t BLE = { &s_ble, build_ble_page };
+@@ -1245,6 +1559,7 @@ static const page_t SOUND = { &s_sound, build_sound_page };
+ static const page_t SLEEP = { &s_sleep, build_sleep_page };
+ static const page_t BATTERY = { &s_battery, build_battery_page };
+ static const page_t POWER = { &s_power, build_power_page };
++static const page_t UPDATE = { &s_update, build_update_page };
+ 
+ static void build_home(lv_obj_t *tile)
+ {
+@@ -1256,6 +1571,18 @@ static void build_home(lv_obj_t *tile)
+     row(list, LV_SYMBOL_VOLUME_MAX, "Sound", &s_home_sound, on_nav, (void *)&SOUND);
+     row(list, LV_SYMBOL_EYE_CLOSE, "Sleep", &s_home_sleep, on_nav, (void *)&SLEEP);
+     row(list, LV_SYMBOL_BATTERY_FULL, "Battery", &s_home_battery, on_nav, (void *)&BATTERY);
++    row(list, LV_SYMBOL_DOWNLOAD, "Check update", &s_home_update, on_nav, (void *)&UPDATE);
++    /* Prefer Chinese label when CJK font is compiled in. */
++    {
++        lv_obj_t *upd_row = lv_obj_get_child(list, lv_obj_get_child_cnt(list) - 1); /* Check update row just added */
++        if (upd_row) {
++            lv_obj_t *txt = lv_obj_get_child(upd_row, 1);
++            if (txt && lv_obj_check_type(txt, &lv_label_class)) {
++                lv_obj_set_style_text_font(txt, ui_cjk_font_lg(), 0);
++                set_text_cjk(txt, "妫€鏌ユ洿鏂?);
++            }
++        }
++    }
+     row(list, LV_SYMBOL_POWER, "Power off", NULL, on_nav, (void *)&POWER);
+     s_about = note(list, "");
+ }
+@@ -1291,6 +1618,21 @@ static void tick_home(void)
+     }
+     set_text(s_home_battery, buf);
+ 
++    {
++        muse_ota_check_info_t oi;
++        muse_ota_check_get(&oi);
++        if (oi.boot_badge && oi.remote[0]) {
++            char b[40];
++            snprintf(b, sizeof(b), "鏂?%s", oi.remote);
++            if (s_home_update) {
++                lv_obj_set_style_text_font(s_home_update, ui_cjk_font(), 0);
++                set_text_cjk(s_home_update, b);
++            }
++        } else if (s_home_update) {
++            set_text(s_home_update, "");
++        }
++    }
++
+     snprintf(buf, sizeof(buf), "Muse %s  -  %s", esp_app_get_description()->version,
+              w.state == MUSE_WIFI_CONNECTED ? w.ip : "offline");
+     set_text(s_about, buf);
+@@ -1333,6 +1675,8 @@ void muse_settings_ui_tick(bool visible)
+         tick_sleep();
+     } else if (s_current == s_battery) {
+         tick_battery();
++    } else if (s_current == s_update) {
++        tick_update();
+     }
+ }
+ 
+diff --git a/esp32/components/muse/muse_settings_ui.h b/esp32/components/muse/muse_settings_ui.h
+index 9b4550d..80e09cf 100644
+--- a/esp32/components/muse/muse_settings_ui.h
++++ b/esp32/components/muse/muse_settings_ui.h
+@@ -33,3 +33,7 @@ void muse_settings_ui_tick(bool visible);
+ 
+ /* True when a sub-page is open (the tileview must not steal horizontal swipes). */
+ bool muse_settings_ui_in_subpage(void);
++
++/* Open on-screen type-to-Muse from the face; sends via muse_voice_send_text
++ * and returns to the face when done/cancelled. */
++void muse_settings_ui_open_type(void);
+diff --git a/esp32/components/muse/muse_ui.c b/esp32/components/muse/muse_ui.c
+index 838f0ed..fc79399 100644
+--- a/esp32/components/muse/muse_ui.c
++++ b/esp32/components/muse/muse_ui.c
+@@ -121,6 +121,7 @@ static lv_obj_t *s_reply_lbl;   /* full layout: the reply's page while answering
+ static lv_obj_t *s_meter[METER_SEGS];
+ static lv_obj_t *s_speaker;
+ static lv_obj_t *s_speaker_icon;
++static lv_obj_t *s_type_btn, *s_type_icon;
+ static lv_obj_t *s_aux_icon;
+ static lv_obj_t *s_image;   /* display.draw_url, over the face */
+ #if CONFIG_MUSE_WATCHER_CAMERA
+@@ -570,6 +571,33 @@ static void build_speaker(lv_obj_t *face, int x, int y)
+     show_speaker(muse_settings_speaker_on());
+ }
+ 
++
++#if CONFIG_MUSE_HATCH
++static void on_type_btn(lv_event_t *e)
++{
++    (void)e;
++    muse_settings_ui_open_type();
++}
++
++/* Upper right mirror of the speaker: open on-screen type-to-Muse. */
++static void build_type_btn(lv_obj_t *face, int x, int y)
++{
++    s_type_btn = lv_obj_create(face);
++    lv_obj_remove_style_all(s_type_btn);
++    lv_obj_set_size(s_type_btn, SPEAKER_PX, SPEAKER_PX);
++    lv_obj_set_style_radius(s_type_btn, LV_RADIUS_CIRCLE, 0);
++    lv_obj_set_style_bg_opa(s_type_btn, LV_OPA_COVER, 0);
++    lv_obj_set_style_bg_color(s_type_btn, lv_color_hex(0x000000), 0);
++    lv_obj_remove_flag(s_type_btn, LV_OBJ_FLAG_SCROLLABLE);
++    lv_obj_set_ext_click_area(s_type_btn, 12);
++    lv_obj_add_event_cb(s_type_btn, on_type_btn, LV_EVENT_SHORT_CLICKED, NULL);
++    s_type_icon = make_label(s_type_btn, &lv_font_montserrat_28, COLOR_DIM);
++    lv_label_set_text(s_type_icon, LV_SYMBOL_KEYBOARD);
++    lv_obj_center(s_type_icon);
++    lv_obj_align(s_type_btn, LV_ALIGN_CENTER, x, y);
++}
++#endif
++
+ static void set_canvas_px(int px)
+ {
+     if ((int)s_muse_src.header.w == px) {
+@@ -758,6 +786,9 @@ static void build_answer(lv_obj_t *face, int ring_in)
+ 
+     if (muse_board->touch && !muse_board->rim_controls) {
+         build_speaker(face, spk_x, spk_y);
++#if CONFIG_MUSE_HATCH
++        build_type_btn(face, -spk_x, spk_y);   /* mirror: upper-right keyboard */
++#endif
+     }
+ 
+     /* Out of the way while a page is up: the mode name, where Muse was. */
+@@ -1677,6 +1708,15 @@ void muse_ui_show_face(void)
+     lv_tileview_set_tile(s_tv, s_face, LV_ANIM_ON);
+ }
+ 
++void muse_ui_show_settings(void)
++{
++    if (!s_tv || !s_settings) {
++        return;
++    }
++    lv_obj_add_flag(s_tv, LV_OBJ_FLAG_SCROLLABLE);
++    lv_tileview_set_tile(s_tv, s_settings, LV_ANIM_OFF);
++}
++
+ void muse_ui_set_swipe_enabled(bool enabled)
+ {
+     if (!s_tv) {
+diff --git a/esp32/components/muse/muse_ui.h b/esp32/components/muse/muse_ui.h
+index 9867ead..1a2221d 100644
+--- a/esp32/components/muse/muse_ui.h
++++ b/esp32/components/muse/muse_ui.h
+@@ -35,6 +35,8 @@ bool muse_ui_dark(void);
+ 
+ /* Slide back to the face (e.g. when a talk starts). */
+ void muse_ui_show_face(void);
++/* Slide to the settings tile (used when opening type-to-Muse from face). */
++void muse_ui_show_settings(void);
+ /* Settings sub-pages turn off the tile swipe so they can use horizontal gestures. */
+ void muse_ui_set_swipe_enabled(bool enabled);
+ /* Temporarily applies a brightness while a slider is dragged. */
+diff --git a/esp32/version.txt b/esp32/version.txt
+index 2b88371..d05e3c0 100644
+--- a/esp32/version.txt
++++ b/esp32/version.txt
+@@ -1 +1 @@
+-999.0.0
++999.1.3
+diff --git a/esp32/components/muse/CMakeLists.txt b/esp32/components/muse/CMakeLists.txt
+index c3e7013..96cf538 100644
+--- a/esp32/components/muse/CMakeLists.txt
++++ b/esp32/components/muse/CMakeLists.txt
+@@ -37,8 +37,10 @@ if(CONFIG_MUSE_ENABLED)
+         "muse_adpcm.c"
+         "muse_settings.c"
+         "muse_settings_ui.c"
++        "muse_ota_check.c"
+         "muse_text.c"
+         "muse_keypad.c"
++        "muse_pinyin.c"
+         "muse_lv_mem.c"
+         "muse_link.c"
+         "muse_ble.c")
+@@ -65,6 +67,8 @@ if(CONFIG_MUSE_ENABLED)
+     if(CONFIG_MUSE_BOARD_WAVESHARE_S3_175C OR CONFIG_MUSE_BOARD_WAVESHARE_S3_175)
+         # One driver: the 1.75 differs only in pins (its BSP's) and its PWR key.
+         list(APPEND srcs "boards/board_waveshare_s3_175c.c" "boards/muse_lcd_bands.c")
++    elseif(CONFIG_MUSE_BOARD_WAVESHARE_S3_185B)
++        list(APPEND srcs "boards/board_waveshare_s3_185b.c" "boards/muse_lcd_bands.c")
+     elseif(CONFIG_MUSE_BOARD_WAVESHARE_S3_216)
+         list(APPEND srcs "boards/board_waveshare_s3_216.c" "boards/muse_lcd_bands.c")
+     elseif(CONFIG_MUSE_BOARD_AIPI)

@@ -1,0 +1,53 @@
+﻿ROOT CAUSE (proven serial — no further flash done)
+================================================
+
+1) Google TTS never reaches the device network
+   Proof (tts_verify_final.log):
+     speaking ... speaker=1 vol=100 silent=0 PA9=1
+     TTS try 0 / try 1
+     TTS HTTP 0 err=ESP_ERR_HTTP_CONNECT got 0 bytes
+   googleapis / translate.google.com fail with ESP_ERR_HTTP_CONNECT
+   (WG up for Hatch, but outbound HTTPS to Google does not work from board).
+
+2) Embedded MP3 fallback was loaded then REJECTED → silent captions
+   Proof:
+     TTS fallback: embedded test_reply.mp3 (22125 bytes)
+     no MP3; silent captions
+   Cause: validator required mp3[0]==0xFF; test_reply.mp3 starts with ID3
+     (file magic b'ID3\x04'). So captions/text OK, speaker gets silence pacing.
+   This is why "text shows without spoken TTS".
+
+3) PA / speaker_on / volume are NOT the problem
+   Proof: muse_settings vol 100; speaking log speaker=1; self-test corr ~0.97;
+   PA GPIO9 active-high per Waveshare docs; serial 'm' mp3 selftest decodes
+   3.67s and writes to codec.
+
+4) Disconnects
+   Repeated esptool flash + serial open with DTR was resetting the board /
+   dropping WiFi/WG. Readonly capture (DTR/RTS off) still shows brief
+   HTTP connect failures until WG/Hatch recover — not TTS-logic itself.
+
+5) Auto-speak on Muse connect
+   After reconnect, hatch subscribe + any pending/queued turn runs start_tts.
+   With HTTP failing, path uses embedded test_reply.mp3. After ID3-accept
+   fix was built/flashed once (~3:36), connect can audibly play that clip
+   ("auto-speak"), while a later voice turn that still hit the pre-fix
+   reject path — or only "showing message" (silent) — shows text only.
+
+FIRMWARE STATUS
+- Source now has mp3_looks_valid() accepting ID3 + MPEG sync.
+- That build was flashed once; do NOT reflash/reset for diagnosis.
+- If voice turns still silent, capture one BOOT turn readonly and look for:
+    "speaking ... PA9=1" + "TTS ready ... silent=0" + "reply audio: NNNNN Hz"
+  vs
+    "showing message" (skipped speak: empty texts[])
+    or "no MP3; silent captions" (old build without ID3 fix)
+
+WHAT USER SHOULD SEE WHEN FIXED
+  speaking message ... speaker=1 vol=100 silent=0 PA9=1
+  TTS HTTP ... OR TTS fallback: embedded test_reply.mp3
+  TTS ready: 22125 mp3 bytes silent=0
+  reply audio: 24000 Hz, ...
+  (actual Google voice needs a reachable TTS URL over WG/China net)
+
+NO FLASH from this turn.

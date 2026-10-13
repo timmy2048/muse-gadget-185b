@@ -1,0 +1,50 @@
+--- a/esp32/components/muse/Kconfig
++++ b/esp32/components/muse/Kconfig
+@@ -195,4 +195,16 @@
+             them. Needs PSRAM. Without it, voice notes go over Home Link's own
+             session to its paired VM and replies are shown as text.
+ 
++    config MUSE_SCREEN_OFF_KEEP_LINK
++        bool "Keep Wi-Fi and Muse's session up while the screen is off"
++        depends on MUSE_ENABLED
++        default y if MUSE_BOARD_WAVESHARE_S3_185B
++        default n
++        help
++            Screen off (sleep timeout) only darkens and pauses the display.
++            Wi-Fi never naps (no disconnect after two minutes low power) and
++            rests at most in light modem sleep (WIFI_PS_MIN_MODEM), so the
++            tunnel and Muse's control session stay connected and waking needs
++            no reconnect. Costs more battery while dark.
++
+ endmenu
+diff --git a/esp32/components/muse/muse_input.c b/esp32/components/muse/muse_input.c
+index c96e3ca..7d09fec 100644
+--- a/esp32/components/muse/muse_input.c
++++ b/esp32/components/muse/muse_input.c
+@@ -381,6 +381,9 @@ static bool update_wifi_nap(TickType_t now, bool paused)
+     }
+     bool nap = paused && !muse_voice_notes_waiting()
+                && (s_nap_now || (s_cpu_low && now - low_since >= pdMS_TO_TICKS(WIFI_NAP_MS)));
++#if CONFIG_MUSE_SCREEN_OFF_KEEP_LINK
++    nap = nap && s_nap_now;   /* only ">nap" on the bench: screen off keeps Wi-Fi joined */
++#endif
+     if (nap != napping) {
+         napping = nap;
+         ESP_LOGI(TAG, "Wi-Fi %s", nap ? "napping" : "waking");
+diff --git a/esp32/components/muse/muse_voice.c b/esp32/components/muse/muse_voice.c
+index 35a7ff4..751557a 100644
+--- a/esp32/components/muse/muse_voice.c
++++ b/esp32/components/muse/muse_voice.c
+@@ -815,7 +815,12 @@ static void voice_task(void *arg)
+             set_resting(rest);
+             /* On battery Wi-Fi rests with the codecs, and between turns dozes
+              * between beacons as xiaozhi's idle does; a press wakes it fully. */
++#if CONFIG_MUSE_SCREEN_OFF_KEEP_LINK
++            /* Screen off keeps the session: doze at most, never the deep rest. */
++            muse_wifi_power(battery ? MUSE_WIFI_DOZE : MUSE_WIFI_FULL);
++#else
+             muse_wifi_power(rest ? MUSE_WIFI_REST : battery ? MUSE_WIFI_DOZE : MUSE_WIFI_FULL);
++#endif
+             if (rest) {
+                 /* Wait for waking, USB power or a bench request without
+                  * polling (the timeout is only a backstop, or a look for

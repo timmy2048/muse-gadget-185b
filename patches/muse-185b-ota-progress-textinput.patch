@@ -1,0 +1,1224 @@
+﻿diff --git a/esp32/components/muse/muse_chat_session.cpp b/esp32/components/muse/muse_chat_session.cpp
+index a6ad810..5adfdc5 100644
+--- a/esp32/components/muse/muse_chat_session.cpp
++++ b/esp32/components/muse/muse_chat_session.cpp
+@@ -51,6 +51,8 @@
+ 
+ #include "esp_attr.h"
+ #include "esp_crt_bundle.h"
++#include "esp_http_client.h"
++#include "driver/gpio.h"
+ #include "esp_heap_caps.h"
+ #include "esp_log.h"
+ #include "esp_random.h"
+@@ -69,6 +71,7 @@ extern "C" {
+ #include "muse_account_api.h"
+ #include "muse_link.h"
+ #include "muse_settings.h"
++#include "muse_text.h"
+ #include "muse_wifi.h"
+ }
+ #include "muse_chat_priv.h"
+@@ -90,7 +93,7 @@ static const char *TAG = "muse_chat_session";
+ #define DICT_CHUNK_BYTES 8192              /* ~170 ms at 24 kHz, as hatch-test sends */
+ #define SCRATCH (64 * 1024)                /* inbound frames reassemble up to this */
+ #define NDJSON_LINE_MAX (16 * 1024)               /* one NDJSON line / the chat ack */
+-#define SUB_LINE_MAX (256 * 1024)          /* an event line grows its buffer up to this */
++#define SUB_LINE_MAX (1024 * 1024)          /* PSRAM; long message_done NDJSON */          /* an event line grows its buffer up to this */
+ #define CHAT_PART (16 * 1024)              /* one body chunk of a long typed message */
+ #define MP3_BUF (512 * 1024)
+ #define MP3_HOLD (1441 + 4)               /* the largest MP3 frame and the next header */
+@@ -302,9 +305,8 @@ static void *json_alloc(size_t n)
+ 
+ static void emit(muse_hatch_ev_t type, const char *text)
+ {
+-    if (s_turn.text) {
+-        return;   /* typed turns report to the console instead */
+-    }
++    /* Typed turns still print @chat on the console; also emit so the face /
++     * voice task can show captions for on-screen keypad messages. */
+     ev_t ev = {};
+     ev.type = type;
+     ev.gen = s_turn.gen;
+@@ -1224,10 +1226,12 @@ static void text_begin(const char *text)
+         return;
+     }
+     ESP_LOGI(TAG, "typed turn: %u bytes", (unsigned)strlen(text));
++    emit(MUSE_HATCH_EV_HEARD, text);
+     send_chat(text, "text");
+     if (s_turn.phase == P_WAIT_REPLY) {
+         mark(M_SENT);
+         muse_hatch_console("sent", nullptr, "\"bytes\":%u", (unsigned)strlen(text));
++        emit(MUSE_HATCH_EV_SENT, nullptr);
+     }
+ }
+ 
+@@ -1377,7 +1381,7 @@ static void message_done(int i, const char *final_text)
+     m.done = true;
+     mark(M_DONE);
+     if (s_turn.text) {
+-        /* The whole text if the pieces didn't add up to it (a line skipped, say): the reader uses it instead. */
++        /* Console still gets the reply; also queue TTS when speaker is on. */
+         size_t n = m.len;
+         if (final_text && final_text[0] && strlen(final_text) != m.len) {
+             n = strlen(final_text);
+@@ -1385,6 +1389,12 @@ static void message_done(int i, const char *final_text)
+         }
+         muse_hatch_console("message_done", nullptr, "\"msg\":%d,\"bytes\":%u", i, (unsigned)n);
+         ESP_LOGI(TAG, "message %s done (%u chars)", m.id, (unsigned)n);
++        if (!m.len && final_text && final_text[0]) {
++            append_text(m, final_text);
++        }
++        if (m.len && m.tts == TTS_NONE && muse_settings_speaker_on()) {
++            m.tts = TTS_QUEUED;
++        }
+         return;
+     }
+     if (!m.len && final_text && final_text[0]) {
+@@ -1460,8 +1470,9 @@ static void on_event(cJSON *line)
+         const char *text = cJSON_GetStringValue(cJSON_GetObjectItem(payload, "text"));
+         if (text && text[0] && s_turn.text) {
+             mark(M_TEXT);
+-            m.len += strlen(text);
++            append_text(m, text);   /* fill texts[] so start_tts can speak */
+             muse_hatch_console("text", text, "\"msg\":%d", i);
++            show_reply_start(m);   /* face captions for on-screen typed turns */
+         } else if (text && text[0]) {
+             mark(M_TEXT);
+             append_text(m, text);
+@@ -1501,6 +1512,177 @@ static void on_chat_ack(stream_t *s)
+ 
+ /* ---- Turn: speech ---- */
+ 
++static void tts_data(const uint8_t *data, size_t len);
++
++#if CONFIG_MUSE_TTS_HTTP
++#define TTS_TEXT_MAX 180
++#define TTS_URL_MAX  1200
++
++static size_t tts_urlencode(const char *in, char *out, size_t out_cap)
++{
++    static const char *hex = "0123456789ABCDEF";
++    size_t o = 0;
++    for (const unsigned char *p = (const unsigned char *)in; *p && o + 4 < out_cap; p++) {
++        unsigned char c = *p;
++        if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
++            c == '-' || c == '_' || c == '.' || c == '~') {
++            out[o++] = (char)c;
++        } else {
++            out[o++] = '%';
++            out[o++] = hex[c >> 4];
++            out[o++] = hex[c & 15];
++        }
++    }
++    out[o] = '\0';
++    return o;
++}
++
++static void tts_clip_text(const char *in, char *out, size_t cap)
++{
++    if (!in || !cap) {
++        if (cap) {
++            out[0] = '\0';
++        }
++        return;
++    }
++    size_t n = 0;
++    while (in[n] && n + 1 < cap && n < TTS_TEXT_MAX) {
++        unsigned char c = (unsigned char)in[n];
++        size_t need = (c < 0x80) ? 1 : (c < 0xE0) ? 2 : (c < 0xF0) ? 3 : 4;
++        if (n + need > TTS_TEXT_MAX || n + need >= cap) {
++            break;
++        }
++        for (size_t i = 0; i < need; i++) {
++            out[n + i] = in[n + i];
++        }
++        n += need;
++    }
++    out[n] = '\0';
++}
++
++static esp_err_t tts_http_on_data(esp_http_client_event_t *evt)
++{
++    if (evt->event_id != HTTP_EVENT_ON_DATA || !evt->data || evt->data_len <= 0) {
++        return ESP_OK;
++    }
++    tts_data(static_cast<const uint8_t *>(evt->data), (size_t)evt->data_len);
++    return ESP_OK;
++}
++
++
++static bool mp3_looks_valid(const uint8_t *data, size_t len)
++{
++    if (!data || len < 4) {
++        return false;
++    }
++    /* MPEG frame sync or ID3v2 tag (test_reply.mp3 and many TTS bodies). */
++    if (data[0] == 0xff && (data[1] & 0xe0) == 0xe0) {
++        return true;
++    }
++    if (len >= 3 && data[0] == 'I' && data[1] == 'D' && data[2] == '3') {
++        return true;
++    }
++    /* Scan a little for a sync word after a short preamble. */
++    size_t lim = len < 2048 ? len - 1 : 2047;
++    for (size_t i = 0; i < lim; i++) {
++        if (data[i] == 0xff && (data[i + 1] & 0xe0) == 0xe0) {
++            return true;
++        }
++    }
++    return false;
++}
++
++static bool fetch_tts_url(const char *url)
++{
++    size_t before = s_turn.mp3_len;
++    esp_http_client_config_t cfg = {};
++    cfg.url = url;
++    cfg.timeout_ms = 8000;  /* fail fast through TTS URL chain */
++    cfg.buffer_size = 4096;
++    cfg.buffer_size_tx = 1024;
++    cfg.event_handler = tts_http_on_data;
++    cfg.crt_bundle_attach = esp_crt_bundle_attach;
++    cfg.disable_auto_redirect = false;
++    esp_http_client_handle_t c = esp_http_client_init(&cfg);
++    if (!c) {
++        return false;
++    }
++    esp_http_client_set_header(c, "User-Agent",
++                                "Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36 Chrome/120.0.0.0 Mobile Safari/537.36");
++    esp_http_client_set_header(c, "Accept", "audio/mpeg,audio/*;q=0.9,*/*;q=0.8");
++    esp_err_t err = esp_http_client_perform(c);
++    int status = esp_http_client_get_status_code(c);
++    esp_http_client_cleanup(c);
++    size_t got = s_turn.mp3_len - before;
++    bool ok = (err == ESP_OK && status >= 200 && status < 300 && got > 64 &&
++               mp3_looks_valid(s_turn.mp3 + before, got));
++    ESP_LOGI(TAG, "TTS HTTP %d err=%s got %u bytes%s", status, esp_err_to_name(err), (unsigned)got,
++             ok ? "" : " (not usable MP3)");
++    if (!ok && got) {
++        s_turn.mp3_len = before;
++    }
++    return ok;
++}
++
++static bool fetch_tts_mp3(const char *text)
++{
++    if (!text || !text[0] || !s_turn.mp3) {
++        return false;
++    }
++    char clip[TTS_TEXT_MAX + 1];
++    tts_clip_text(text, clip, sizeof(clip));
++    if (!clip[0]) {
++        return false;
++    }
++    char enc[TTS_URL_MAX];
++    tts_urlencode(clip, enc, sizeof(enc));
++    /* Prefer WG-local proxy (10.0.0.1), then China CDN, then Google, then embedded. */
++    const char *prefixes[4];
++    int npref;
++    if (muse_text_has_cjk(clip)) {
++        prefixes[0] = CONFIG_MUSE_TTS_URL_ZH;
++        prefixes[1] = "https://fanyi.baidu.com/gettts?lan=zh&spd=5&source=web&text=";
++        prefixes[2] = "https://dict.youdao.com/dictvoice?type=0&audio=";
++        prefixes[3] = "https://translate.googleapis.com/translate_tts?ie=UTF-8&client=gtx&tl=zh-CN&q=";
++        npref = 4;
++    } else {
++        prefixes[0] = CONFIG_MUSE_TTS_URL_EN;
++        prefixes[1] = "https://fanyi.baidu.com/gettts?lan=en&spd=5&source=web&text=";
++        prefixes[2] = "https://dict.youdao.com/dictvoice?type=1&audio=";
++        prefixes[3] = "https://translate.googleapis.com/translate_tts?ie=UTF-8&client=gtx&tl=en&q=";
++        npref = 4;
++    }
++    char url[TTS_URL_MAX];
++    for (int i = 0; i < npref; i++) {
++        if (!prefixes[i] || !prefixes[i][0]) {
++            continue;
++        }
++        if (snprintf(url, sizeof(url), "%s%s", prefixes[i], enc) >= (int)sizeof(url)) {
++            continue;
++        }
++        ESP_LOGI(TAG, "TTS try %d", i);
++        if (fetch_tts_url(url)) {
++            return true;
++        }
++    }
++    return false;
++}
++
++static bool load_embedded_reply_mp3(void)
++{
++    extern const uint8_t mp3_start[] asm("_binary_test_reply_mp3_start");
++    extern const uint8_t mp3_end[] asm("_binary_test_reply_mp3_end");
++    size_t len = (size_t)(mp3_end - mp3_start);
++    if (!len || !s_turn.mp3) {
++        return false;
++    }
++    s_turn.mp3_len = 0;
++    tts_data(mp3_start, len);
++    ESP_LOGI(TAG, "TTS fallback: embedded test_reply.mp3 (%u bytes)", (unsigned)s_turn.mp3_len);
++    return s_turn.mp3_len > 64 && mp3_looks_valid(s_turn.mp3, s_turn.mp3_len);
++}
++#endif /* CONFIG_MUSE_TTS_HTTP */
++
+ static void start_tts(void)
+ {
+     if (s_turn.tts_msg >= 0) {
+@@ -1511,21 +1693,45 @@ static void start_tts(void)
+         if (m.tts != TTS_QUEUED) {
+             continue;
+         }
+-        /*
+-         * Replies are text, shown at reading pace: silence in place of speech
+-         * paces the captions and ends the turn. To speak them instead, send
+-         * the message's text (s_turn.texts + i * TEXT_MAX, if texts was
+-         * allocated; up to TEXT_MAX - 1 bytes) to a TTS API of your choice and
+-         * play the MP3 it returns. In place of the silence below: keep
+-         * m.tts = TTS_ACTIVE and s_turn.tts_msg = i, set s_turn.silent = false,
+-         * m.pcm_start = s_turn.pcm_out, m.pcm_frames = 0, s_turn.mp3_len = 0,
+-         * s_turn.mp3_ended = false, s_turn.kbps = 0, s_turn.down_rate = 0 and
+-         * mp3dec_init(&s_turn.dec). Then, on this task, pass the MP3 to
+-         * tts_data() as it arrives (it buffers up to MP3_BUF and drops the
+-         * rest, so hold off while it's full) and set s_turn.mp3_ended at the
+-         * end. decode() plays it at the speaker's volume, captions following,
+-         * and finishes the message once it's drained.
+-         */
++        const char *text = (s_turn.texts && m.len) ? (s_turn.texts + i * TEXT_MAX) : nullptr;
++        bool want_speak = muse_settings_speaker_on() && text && text[0];
++#if CONFIG_MUSE_TTS_HTTP
++        if (want_speak) {
++            m.pcm_start = s_turn.pcm_out;
++            m.pcm_frames = 0;
++            m.tts = TTS_ACTIVE;
++            s_turn.tts_msg = i;
++            s_turn.silent = false;
++            s_turn.mp3_len = 0;
++            s_turn.mp3_ended = false;
++            s_turn.kbps = 0;
++            s_turn.down_rate = 0;
++            mp3dec_init(&s_turn.dec);
++            mark(M_TTS);
++            gpio_set_direction(GPIO_NUM_9, GPIO_MODE_OUTPUT);
++            gpio_set_level(GPIO_NUM_9, 1);
++            ESP_LOGI(TAG, "speaking message %s (%u chars) speaker=%d vol=%d silent=0 PA9=1",
++                     m.id, (unsigned)m.len, (int)muse_settings_speaker_on(), muse_settings_volume());
++            show_reply_start(m);
++            bool got = fetch_tts_mp3(text);
++            if (!got) {
++                ESP_LOGW(TAG, "TTS HTTP failed; using embedded test_reply.mp3");
++                got = load_embedded_reply_mp3();
++            }
++            if (!got) {
++                ESP_LOGW(TAG, "no MP3; silent captions");
++                s_turn.silent = true;
++                m.pcm_frames = (uint32_t)(m.len * MIC_RATE / TEXT_CHARS_PER_S);
++                s_turn.mp3_len = 0;
++                s_turn.mp3_ended = true;
++            } else {
++                s_turn.mp3_ended = true;
++                ESP_LOGI(TAG, "TTS ready: %u mp3 bytes silent=%d", (unsigned)s_turn.mp3_len, (int)s_turn.silent);
++            }
++            return;
++        }
++#endif
++        (void)want_speak;
+         m.pcm_start = s_turn.pcm_out;
+         m.pcm_frames = (uint32_t)(m.len * MIC_RATE / TEXT_CHARS_PER_S);
+         m.tts = TTS_ACTIVE;
+diff --git a/esp32/components/muse/muse_ota.h b/esp32/components/muse/muse_ota.h
+new file mode 100644
+index 0000000..2e1c62b
+--- /dev/null
++++ b/esp32/components/muse/muse_ota.h
+@@ -0,0 +1,78 @@
++/*
++ * On-device OTA check: fetch WG-local firmware/latest.json, compare versions,
++ * and hand a confirmed URL to Home Link's ota_start via muse_ota_apply.
++ */
++
++#pragma once
++
++#include <stdbool.h>
++#include <stddef.h>
++#include <stdint.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++#ifndef CONFIG_MUSE_OTA_MANIFEST_URL
++#define MUSE_OTA_MANIFEST_URL_DEFAULT "http://10.0.0.1:8790/firmware/latest.json"
++#else
++#define MUSE_OTA_MANIFEST_URL_DEFAULT CONFIG_MUSE_OTA_MANIFEST_URL
++#endif
++
++typedef enum {
++    MUSE_OTA_CHECK_IDLE = 0,
++    MUSE_OTA_CHECK_BUSY,
++    MUSE_OTA_CHECK_LATEST,
++    MUSE_OTA_CHECK_UPDATE,
++    MUSE_OTA_CHECK_ERROR,
++} muse_ota_check_state_t;
++
++typedef struct {
++    muse_ota_check_state_t state;
++    char running[32];
++    char remote[32];
++    char url[192];
++    char sha256[72];
++    char notes[96];
++    int64_t size;
++    char error[64];
++    bool boot_badge;   /* true once a newer remote was seen (boot or menu) */
++} muse_ota_check_info_t;
++
++/* Mirror of main/ota.h result for the Muse UI (implemented in muse_glue.c). */
++typedef enum {
++    MUSE_OTA_APPLIED = 0,
++    MUSE_OTA_SKIPPED,
++    MUSE_OTA_FAILED,
++} muse_ota_apply_result_t;
++
++typedef struct {
++    muse_ota_apply_result_t result;
++    const char *detail;
++    const char *new_version;
++    const char *running_version;
++} muse_ota_apply_event_t;
++
++typedef void (*muse_ota_apply_cb_t)(const muse_ota_apply_event_t *ev, void *user);
++typedef void (*muse_ota_progress_cb_t)(int percent, void *user);
++
++bool muse_ota_is_enabled(void);
++void muse_ota_apply(const char *url, bool force, muse_ota_apply_cb_t cb, void *user);
++void muse_ota_set_progress_cb(muse_ota_progress_cb_t cb, void *user);
++int muse_ota_progress_percent(void);
++
++/* Snapshot of the last check (any task). */
++void muse_ota_check_get(muse_ota_check_info_t *out);
++
++/* Start a background HTTP GET of the manifest. Safe to call from UI. */
++void muse_ota_check_start(void);
++
++/* Once after boot: wait for IP, then check once for the settings badge. */
++void muse_ota_check_schedule_boot(void);
++
++/* Semver-ish compare shared with the menu (true if cand > cur). */
++bool muse_ota_version_is_newer(const char *cand, const char *cur);
++
++#ifdef __cplusplus
++}
++#endif
+diff --git a/esp32/components/muse/muse_settings_ui.c b/esp32/components/muse/muse_settings_ui.c
+index 01d294b..ae76cff 100644
+--- a/esp32/components/muse/muse_settings_ui.c
++++ b/esp32/components/muse/muse_settings_ui.c
+@@ -38,6 +38,11 @@
+ #include "muse_ui.h"
+ #include "muse_voice.h"
+ #include "muse_wifi.h"
++#include "muse_ota.h"
++
++#if CONFIG_MUSE_CJK_FONT
++LV_FONT_DECLARE(muse_font_cjk_16)
++#endif
+ 
+ /* Keep content in a column that stays inside a round panel (and fits a 368 px one). */
+ #define LIST_W 330
+@@ -60,7 +65,7 @@ typedef void (*text_done_cb_t)(const char *text);
+ static int s_text_scale = 466;
+ static lv_obj_t *s_tile;
+ static lv_obj_t *s_current;
+-static lv_obj_t *s_home, *s_wifi, *s_hatch, *s_ble, *s_sound, *s_sleep, *s_battery, *s_power, *s_text;
++static lv_obj_t *s_home, *s_wifi, *s_hatch, *s_ble, *s_sound, *s_sleep, *s_battery, *s_power, *s_update, *s_text;
+ 
+ /*
+  * Only home is kept. A sub-page is built when it opens and deleted on the way
+@@ -73,7 +78,7 @@ typedef struct {
+ } page_t;
+ 
+ /* Home values. */
+-static lv_obj_t *s_home_wifi, *s_home_hatch, *s_home_ble, *s_home_sound, *s_home_sleep, *s_home_battery, *s_about;
++static lv_obj_t *s_home_wifi, *s_home_hatch, *s_home_ble, *s_home_sound, *s_home_sleep, *s_home_battery, *s_home_update, *s_home_type, *s_about;
+ 
+ /* Wi-Fi page. */
+ static lv_obj_t *s_wifi_sw, *s_wifi_status, *s_wifi_saved, *s_wifi_scan_btn, *s_wifi_scan_lbl, *s_wifi_list;
+@@ -108,6 +113,13 @@ static lv_obj_t *s_batt_status, *s_batt_level, *s_batt_drain, *s_batt_full, *s_b
+     *s_batt_busy, *s_batt_awake;
+ static int64_t s_batt_shown_us;
+ 
++/* Update / OTA page. */
++static lv_obj_t *s_upd_status, *s_upd_detail, *s_upd_check_lbl, *s_upd_confirm_btn, *s_upd_confirm_lbl;
++static lv_obj_t *s_upd_bar, *s_upd_pct;
++static muse_ota_check_state_t s_upd_shown = (muse_ota_check_state_t)-1;
++static bool s_upd_applying;
++static int s_upd_last_pct = -1;
++
+ /* Text entry page. */
+ static lv_obj_t *s_text_title, *s_text_ta;
+ static lv_obj_t *s_text_kp;                 /* a screen under 2" */
+@@ -139,6 +151,49 @@ static void set_text(lv_obj_t *l, const char *text)
+     }
+ }
+ 
++
++#if CONFIG_MUSE_CJK_FONT
++/* Montserrat for Latin + Unifont CJK fallback so 妫€鏌ユ洿鏂?etc. render. */
++static const lv_font_t *ui_cjk_font(void)
++{
++    static lv_font_t font;
++    static bool ready;
++    if (!ready) {
++        font = lv_font_montserrat_16;
++        font.fallback = &muse_font_cjk_16;
++        ready = true;
++    }
++    return &font;
++}
++
++static const lv_font_t *ui_cjk_font_lg(void)
++{
++    static lv_font_t font;
++    static bool ready;
++    if (!ready) {
++        font = lv_font_montserrat_20;
++        font.fallback = &muse_font_cjk_16;
++        ready = true;
++    }
++    return &font;
++}
++
++static void set_text_cjk(lv_obj_t *l, const char *text)
++{
++    if (!l || !text) {
++        return;
++    }
++    if (strcmp(lv_label_get_text(l), text) != 0) {
++        lv_label_set_text(l, text);
++    }
++}
++#else
++static const lv_font_t *ui_cjk_font(void) { return &lv_font_montserrat_16; }
++static const lv_font_t *ui_cjk_font_lg(void) { return &lv_font_montserrat_20; }
++static void set_text_cjk(lv_obj_t *l, const char *text) { set_text(l, text); }
++#endif
++
++
+ static lv_obj_t *note(lv_obj_t *list, const char *text)
+ {
+     lv_obj_t *l = label(list, &lv_font_montserrat_16, COLOR_DIM, text);
+@@ -359,7 +414,7 @@ static lv_obj_t *info_row(lv_obj_t *list, const char *text)
+ 
+ static void drop(lv_obj_t *p)
+ {
+-    lv_obj_t **const pages[] = { &s_wifi, &s_hatch, &s_ble, &s_sound, &s_sleep, &s_battery, &s_power, &s_text };
++    lv_obj_t **const pages[] = { &s_wifi, &s_hatch, &s_ble, &s_sound, &s_sleep, &s_battery, &s_power, &s_update, &s_text };
+     for (size_t i = 0; i < sizeof(pages) / sizeof(pages[0]); i++) {
+         if (*pages[i] == p) {
+             *pages[i] = NULL;
+@@ -1211,6 +1266,219 @@ static void tick_battery(void)
+     set_text(s_batt_awake, buf);
+ }
+ 
++
++/* ---------- Update (OTA check) ---------- */
++
++static void on_ota_apply_done(const muse_ota_apply_event_t *ev, void *user)
++{
++    (void)user;
++    s_upd_applying = false;
++    s_upd_last_pct = -1;
++    muse_state_set_progress(0);
++    if (s_upd_bar) {
++        lv_obj_add_flag(s_upd_bar, LV_OBJ_FLAG_HIDDEN);
++    }
++    if (s_upd_pct) {
++        lv_obj_add_flag(s_upd_pct, LV_OBJ_FLAG_HIDDEN);
++    }
++    if (!ev) {
++        return;
++    }
++    if (ev->result == MUSE_OTA_APPLIED) {
++        if (s_upd_status) {
++            set_text_cjk(s_upd_status, "鍗囩骇鎴愬姛锛屾鍦ㄩ噸鍚€?);
++        }
++        muse_state_set_caption("OTA OK, rebooting");
++    } else if (ev->result == MUSE_OTA_SKIPPED) {
++        if (s_upd_status) {
++            set_text_cjk(s_upd_status, "宸茶烦杩囷紙鐗堟湰鏈洿鏂帮級");
++        }
++    } else {
++        char buf[128];
++        snprintf(buf, sizeof(buf), "鍗囩骇澶辫触锛?.80s", ev->detail ? ev->detail : "?");
++        if (s_upd_status) {
++            set_text_cjk(s_upd_status, buf);
++        }
++        muse_state_set_caption("OTA failed");
++    }
++    s_upd_shown = (muse_ota_check_state_t)-1;
++}
++
++static void on_update_check(lv_event_t *e)
++{
++    (void)e;
++    if (s_upd_applying) {
++        return;
++    }
++    muse_ota_check_start();
++    s_upd_shown = (muse_ota_check_state_t)-1;
++}
++
++static void on_update_confirm(lv_event_t *e)
++{
++    (void)e;
++    if (s_upd_applying) {
++        return;
++    }
++    muse_ota_check_info_t info;
++    muse_ota_check_get(&info);
++    if (info.state != MUSE_OTA_CHECK_UPDATE || !info.url[0]) {
++        return;
++    }
++    s_upd_applying = true;
++    s_upd_last_pct = -1;
++    if (s_upd_status) {
++        set_text_cjk(s_upd_status, "姝ｅ湪涓嬭浇鍗囩骇锛岃鍕挎柇鐢碘€?);
++    }
++    if (s_upd_bar) {
++        lv_bar_set_value(s_upd_bar, 0, LV_ANIM_OFF);
++        lv_obj_remove_flag(s_upd_bar, LV_OBJ_FLAG_HIDDEN);
++    }
++    if (s_upd_pct) {
++        set_text(s_upd_pct, "0%");
++        lv_obj_remove_flag(s_upd_pct, LV_OBJ_FLAG_HIDDEN);
++    }
++    if (s_upd_detail) {
++        char buf[128];
++        snprintf(buf, sizeof(buf), "%s 鈫?%s", info.running, info.remote);
++        set_text_cjk(s_upd_detail, buf);
++    }
++    if (s_upd_confirm_btn) {
++        lv_obj_add_flag(s_upd_confirm_btn, LV_OBJ_FLAG_HIDDEN);
++    }
++    muse_state_set_caption("OTA downloading鈥?);
++    /* force=false: ota_start still gates on embedded image version. */
++    muse_ota_apply(info.url, false, on_ota_apply_done, NULL);
++}
++
++static void build_update_page(lv_obj_t *tile)
++{
++    lv_obj_t *list;
++    s_update = page(tile, "UPDATE", true, &list);
++    /* Title above is ASCII-safe via showable; replace with CJK after create. */
++    lv_obj_t *title = lv_obj_get_child(s_update, 0);
++    if (title && lv_obj_check_type(title, &lv_label_class)) {
++        lv_obj_set_style_text_font(title, ui_cjk_font_lg(), 0);
++        lv_label_set_text(title, "妫€鏌ユ洿鏂?);
++    }
++    s_upd_status = note(list, "");
++    lv_obj_set_style_text_font(s_upd_status, ui_cjk_font(), 0);
++    s_upd_detail = note(list, "");
++    lv_obj_set_style_text_font(s_upd_detail, ui_cjk_font(), 0);
++    s_upd_bar = lv_bar_create(list);
++    lv_obj_set_size(s_upd_bar, lv_pct(90), 14);
++    lv_bar_set_range(s_upd_bar, 0, 100);
++    lv_bar_set_value(s_upd_bar, 0, LV_ANIM_OFF);
++    lv_obj_set_style_bg_color(s_upd_bar, lv_color_hex(0x2a2345), LV_PART_MAIN);
++    lv_obj_set_style_bg_color(s_upd_bar, lv_color_hex(COLOR_ACCENT), LV_PART_INDICATOR);
++    lv_obj_set_style_radius(s_upd_bar, 7, LV_PART_MAIN);
++    lv_obj_set_style_radius(s_upd_bar, 7, LV_PART_INDICATOR);
++    lv_obj_add_flag(s_upd_bar, LV_OBJ_FLAG_HIDDEN);
++    s_upd_pct = note(list, "0%");
++    lv_obj_add_flag(s_upd_pct, LV_OBJ_FLAG_HIDDEN);
++    button(list, "Check", COLOR_ACCENT, on_update_check, &s_upd_check_lbl);
++    if (s_upd_check_lbl) {
++        lv_obj_set_style_text_font(s_upd_check_lbl, ui_cjk_font_lg(), 0);
++        set_text_cjk(s_upd_check_lbl, "妫€鏌ユ洿鏂?);
++    }
++    s_upd_confirm_btn = button(list, "Upgrade", COLOR_WARN, on_update_confirm, &s_upd_confirm_lbl);
++    if (s_upd_confirm_lbl) {
++        lv_obj_set_style_text_font(s_upd_confirm_lbl, ui_cjk_font_lg(), 0);
++        set_text_cjk(s_upd_confirm_lbl, "纭鍗囩骇");
++    }
++    lv_obj_add_flag(s_upd_confirm_btn, LV_OBJ_FLAG_HIDDEN);
++    s_upd_shown = (muse_ota_check_state_t)-1;
++    s_upd_applying = false;
++}
++
++static void tick_update(void)
++{
++    if (s_upd_applying) {
++        int pct = muse_ota_progress_percent();
++        if (pct < 0) {
++            pct = 0;
++        }
++        if (pct != s_upd_last_pct) {
++            s_upd_last_pct = pct;
++            if (s_upd_bar) {
++                lv_bar_set_value(s_upd_bar, pct, LV_ANIM_ON);
++            }
++            if (s_upd_pct) {
++                char buf[16];
++                snprintf(buf, sizeof(buf), "%d%%", pct);
++                set_text(s_upd_pct, buf);
++            }
++            if (s_upd_status) {
++                char msg[64];
++                if (pct >= 100) {
++                    snprintf(msg, sizeof(msg), "姝ｅ湪鏍￠獙骞跺啓鍏モ€?);
++                } else if (pct >= 10) {
++                    snprintf(msg, sizeof(msg), "姝ｅ湪涓嬭浇 %d%%锛岃鍕挎柇鐢?, pct);
++                } else {
++                    snprintf(msg, sizeof(msg), "姝ｅ湪涓嬭浇鍗囩骇锛岃鍕挎柇鐢碘€?);
++                }
++                set_text_cjk(s_upd_status, msg);
++            }
++            muse_state_set_progress(pct / 100.0f);
++        }
++        return;
++    }
++    muse_ota_check_info_t info;
++    muse_ota_check_get(&info);
++    if (info.state == s_upd_shown) {
++        return;
++    }
++    s_upd_shown = info.state;
++    char detail[192];
++    detail[0] = '\0';
++    switch (info.state) {
++    case MUSE_OTA_CHECK_IDLE:
++        set_text_cjk(s_upd_status, "鐐逛笅鏂规鏌ユ湇鍔″櫒鍥轰欢鐗堟湰");
++        snprintf(detail, sizeof(detail), "褰撳墠 %s", info.running[0] ? info.running : "?");
++        lv_obj_add_flag(s_upd_confirm_btn, LV_OBJ_FLAG_HIDDEN);
++        break;
++    case MUSE_OTA_CHECK_BUSY:
++        set_text_cjk(s_upd_status, "姝ｅ湪妫€鏌モ€?);
++        snprintf(detail, sizeof(detail), "褰撳墠 %s", info.running);
++        lv_obj_add_flag(s_upd_confirm_btn, LV_OBJ_FLAG_HIDDEN);
++        break;
++    case MUSE_OTA_CHECK_LATEST:
++        set_text_cjk(s_upd_status, "宸叉槸鏈€鏂?);
++        snprintf(detail, sizeof(detail), "褰撳墠 %s", info.running);
++        lv_obj_add_flag(s_upd_confirm_btn, LV_OBJ_FLAG_HIDDEN);
++        break;
++    case MUSE_OTA_CHECK_UPDATE:
++        {
++            char msg[128];
++            snprintf(msg, sizeof(msg), "鍙戠幇鏂扮増鏈?%.40s锛岀‘璁ゅ崌绾э紵", info.remote);
++            set_text_cjk(s_upd_status, msg);
++            if (info.notes[0]) {
++                snprintf(detail, sizeof(detail), "%s -> %s\n%.80s", info.running, info.remote, info.notes);
++            } else if (info.size > 0) {
++                snprintf(detail, sizeof(detail), "%s -> %s (%lld KB)", info.running, info.remote,
++                         (long long)(info.size / 1024));
++            } else {
++                snprintf(detail, sizeof(detail), "%s -> %s", info.running, info.remote);
++            }
++            set_text_cjk(s_upd_confirm_lbl, "纭鍗囩骇");
++            lv_obj_remove_flag(s_upd_confirm_btn, LV_OBJ_FLAG_HIDDEN);
++        }
++        break;
++    case MUSE_OTA_CHECK_ERROR:
++    default:
++        {
++            char msg[128];
++            snprintf(msg, sizeof(msg), "妫€鏌ュけ璐ワ細%.80s", info.error[0] ? info.error : "?");
++            set_text_cjk(s_upd_status, msg);
++            snprintf(detail, sizeof(detail), "褰撳墠 %s", info.running);
++            lv_obj_add_flag(s_upd_confirm_btn, LV_OBJ_FLAG_HIDDEN);
++        }
++        break;
++    }
++    set_text_cjk(s_upd_detail, detail);
++}
++
++
+ /* ---------- Power ---------- */
+ 
+ static void on_power_off(lv_event_t *e)
+@@ -1238,6 +1506,35 @@ static void build_power_page(lv_obj_t *tile)
+ 
+ /* ---------- Home ---------- */
+ 
++
++#if CONFIG_MUSE_HATCH
++static void on_type_done(const char *text)
++{
++    if (!text || !text[0]) {
++        return;
++    }
++    char *copy = strdup(text);
++    if (!copy) {
++        muse_state_set_caption("OUT OF MEMORY");
++        return;
++    }
++    /* Voice task owns `copy` and drives the reply (captions + TTS). */
++    muse_voice_send_text(copy);
++}
++
++static void on_type_open(lv_event_t *e)
++{
++    (void)e;
++    open_text("Message", "", false, 280, "Type to Muse", on_type_done, s_home);
++#if CONFIG_MUSE_CJK_FONT
++    if (s_text_title) {
++        lv_obj_set_style_text_font(s_text_title, ui_cjk_font_lg(), 0);
++        set_text_cjk(s_text_title, "鎵撳瓧鍙?Muse");
++    }
++#endif
++}
++#endif
++
+ static const page_t WIFI = { &s_wifi, build_wifi_page };
+ static const page_t HATCH = { &s_hatch, build_hatch_page };
+ static const page_t BLE = { &s_ble, build_ble_page };
+@@ -1245,6 +1542,7 @@ static const page_t SOUND = { &s_sound, build_sound_page };
+ static const page_t SLEEP = { &s_sleep, build_sleep_page };
+ static const page_t BATTERY = { &s_battery, build_battery_page };
+ static const page_t POWER = { &s_power, build_power_page };
++static const page_t UPDATE = { &s_update, build_update_page };
+ 
+ static void build_home(lv_obj_t *tile)
+ {
+@@ -1256,6 +1554,31 @@ static void build_home(lv_obj_t *tile)
+     row(list, LV_SYMBOL_VOLUME_MAX, "Sound", &s_home_sound, on_nav, (void *)&SOUND);
+     row(list, LV_SYMBOL_EYE_CLOSE, "Sleep", &s_home_sleep, on_nav, (void *)&SLEEP);
+     row(list, LV_SYMBOL_BATTERY_FULL, "Battery", &s_home_battery, on_nav, (void *)&BATTERY);
++#if CONFIG_MUSE_HATCH
++    row(list, LV_SYMBOL_EDIT, "Type message", &s_home_type, on_type_open, NULL);
++    {
++        lv_obj_t *type_row = lv_obj_get_child(list, lv_obj_get_child_cnt(list) - 1);
++        if (type_row) {
++            lv_obj_t *txt = lv_obj_get_child(type_row, 1);
++            if (txt && lv_obj_check_type(txt, &lv_label_class)) {
++                lv_obj_set_style_text_font(txt, ui_cjk_font_lg(), 0);
++                set_text_cjk(txt, "鎵撳瓧");
++            }
++        }
++    }
++#endif
++    row(list, LV_SYMBOL_DOWNLOAD, "Check update", &s_home_update, on_nav, (void *)&UPDATE);
++    /* Prefer Chinese label when CJK font is compiled in. */
++    {
++        lv_obj_t *upd_row = lv_obj_get_child(list, lv_obj_get_child_cnt(list) - 1); /* Check update row just added */
++        if (upd_row) {
++            lv_obj_t *txt = lv_obj_get_child(upd_row, 1);
++            if (txt && lv_obj_check_type(txt, &lv_label_class)) {
++                lv_obj_set_style_text_font(txt, ui_cjk_font_lg(), 0);
++                set_text_cjk(txt, "妫€鏌ユ洿鏂?);
++            }
++        }
++    }
+     row(list, LV_SYMBOL_POWER, "Power off", NULL, on_nav, (void *)&POWER);
+     s_about = note(list, "");
+ }
+@@ -1291,6 +1614,21 @@ static void tick_home(void)
+     }
+     set_text(s_home_battery, buf);
+ 
++    {
++        muse_ota_check_info_t oi;
++        muse_ota_check_get(&oi);
++        if (oi.boot_badge && oi.remote[0]) {
++            char b[40];
++            snprintf(b, sizeof(b), "鏂?%s", oi.remote);
++            if (s_home_update) {
++                lv_obj_set_style_text_font(s_home_update, ui_cjk_font(), 0);
++                set_text_cjk(s_home_update, b);
++            }
++        } else if (s_home_update) {
++            set_text(s_home_update, "");
++        }
++    }
++
+     snprintf(buf, sizeof(buf), "Muse %s  -  %s", esp_app_get_description()->version,
+              w.state == MUSE_WIFI_CONNECTED ? w.ip : "offline");
+     set_text(s_about, buf);
+@@ -1333,6 +1671,8 @@ void muse_settings_ui_tick(bool visible)
+         tick_sleep();
+     } else if (s_current == s_battery) {
+         tick_battery();
++    } else if (s_current == s_update) {
++        tick_update();
+     }
+ }
+ 
+diff --git a/esp32/components/muse/muse_voice.c b/esp32/components/muse/muse_voice.c
+index 35a7ff4..20abbb2 100644
+--- a/esp32/components/muse/muse_voice.c
++++ b/esp32/components/muse/muse_voice.c
+@@ -347,7 +347,7 @@ static void go_idle(const char *caption);
+ static bool hatch_reply(bool *delivered)
+ {
+     muse_state_set_mode(MUSE_MODE_THINKING);
+-    muse_state_set_caption("SENDING VOICE NOTE");   /* until there's a transcript or reply */
++    muse_state_set_caption("SENDING...");   /* until there's a transcript or reply */
+     static int16_t buf[MUSE_AUDIO_CHUNK];
+     static const int16_t silence[MUSE_AUDIO_CHUNK];
+     char text[96];
+@@ -394,6 +394,9 @@ static bool hatch_reply(bool *delivered)
+         if (got_event(MUSE_PTT_DOWN)) {
+             ESP_LOGI(TAG, "reply interrupted");
+             muse_hatch_turn_cancel();
++#if CONFIG_MUSE_HATCH
++            muse_hatch_text_cancel();
++#endif
+             muse_state_set_level(0);
+             return true;
+         }
+@@ -786,6 +789,61 @@ static bool can_record(void)
+     return true;
+ }
+ 
++
++#if CONFIG_MUSE_HATCH
++static char *s_pending_text;   /* malloc'd; voice task takes it */
++static portMUX_TYPE s_text_mux = portMUX_INITIALIZER_UNLOCKED;
++
++void muse_voice_send_text(char *text)
++{
++    if (!text) {
++        return;
++    }
++    if (!text[0]) {
++        free(text);
++        return;
++    }
++    char *prev = NULL;
++    portENTER_CRITICAL(&s_text_mux);
++    prev = s_pending_text;
++    s_pending_text = text;
++    portEXIT_CRITICAL(&s_text_mux);
++    free(prev);
++    muse_state_poke();
++}
++
++static char *take_pending_text(void)
++{
++    char *t = NULL;
++    portENTER_CRITICAL(&s_text_mux);
++    t = s_pending_text;
++    s_pending_text = NULL;
++    portEXIT_CRITICAL(&s_text_mux);
++    return t;
++}
++
++/* Typed message: same reply path as push-to-talk (captions + TTS). */
++static void run_typed_turn(char *text)
++{
++    muse_wifi_power(MUSE_WIFI_FULL);
++    set_resting(false);
++    muse_state_set_mode(MUSE_MODE_THINKING);
++    muse_state_set_caption("SENDING鈥?);
++    muse_hatch_text_turn(text);   /* frees text */
++    bool delivered = false;
++    bool interrupted = hatch_reply(&delivered);
++    if (!interrupted) {
++        muse_state_make_happy();
++        go_idle("");
++    }
++}
++#else
++void muse_voice_send_text(char *text)
++{
++    free(text);
++}
++#endif
++
+ static void voice_task(void *arg)
+ {
+     bool pending_down = false;
+@@ -815,7 +873,12 @@ static void voice_task(void *arg)
+             set_resting(rest);
+             /* On battery Wi-Fi rests with the codecs, and between turns dozes
+              * between beacons as xiaozhi's idle does; a press wakes it fully. */
++#if CONFIG_MUSE_SCREEN_OFF_KEEP_LINK
++            /* Screen off keeps the session: doze at most, never the deep rest. */
++            muse_wifi_power(battery ? MUSE_WIFI_DOZE : MUSE_WIFI_FULL);
++#else
+             muse_wifi_power(rest ? MUSE_WIFI_REST : battery ? MUSE_WIFI_DOZE : MUSE_WIFI_FULL);
++#endif
+             if (rest) {
+                 /* Wait for waking, USB power or a bench request without
+                  * polling (the timeout is only a backstop, or a look for
+@@ -843,6 +906,16 @@ static void voice_task(void *arg)
+                 muse_audio_loopback_test(muse_settings_volume());
+                 pre_reset();
+             }
++#if CONFIG_MUSE_HATCH
++            {
++                char *typed = take_pending_text();
++                if (typed) {
++                    run_typed_turn(typed);
++                    pre_reset();
++                    continue;
++                }
++            }
++#endif
+             /* The 20 ms read paces this loop. */
+             idle_capture();
+             if (xQueueReceive(s_queue, &ev, 0) != pdTRUE) {
+diff --git a/esp32/components/muse/muse_voice.h b/esp32/components/muse/muse_voice.h
+index 7a3ae28..d42e8ba 100644
+--- a/esp32/components/muse/muse_voice.h
++++ b/esp32/components/muse/muse_voice.h
+@@ -44,6 +44,14 @@ void muse_voice_request_loopback(void);
+ /* Bench test: decodes and plays a built-in MP3 reply. */
+ void muse_voice_request_mp3test(void);
+ 
++/*
++ * Queue a typed message for Muse (from the on-screen keypad). Takes ownership
++ * of `text` (malloc'd) and frees it. No-op / frees text if Hatch is off.
++ * The voice task sends it and plays the reply (captions + optional TTS).
++ */
++void muse_voice_send_text(char *text);
++
++
+ /* Asleep with nothing to play: codecs off, Wi-Fi dozing. */
+ bool muse_voice_resting(void);
+ 
+diff --git a/esp32/main/muse_glue.c b/esp32/main/muse_glue.c
+index 51cba9a..6164c48 100644
+--- a/esp32/main/muse_glue.c
++++ b/esp32/main/muse_glue.c
+@@ -42,6 +42,8 @@
+ #include "muse_mem.h"
+ #include "muse_settings.h"
+ #include "muse_state.h"
++#include "muse_ota.h"
++#include "ota.h"
+ 
+ static const char *TAG = "link.muse";
+ 
+@@ -639,6 +641,7 @@ void muse_glue_storage_ready(void) {
+ }
+ 
+ void muse_glue_link_ready(void) {
++    muse_ota_check_schedule_boot();
+     xEventGroupSetBits(s_ready, BIT_LINK);
+ }
+ 
+@@ -680,3 +683,76 @@ void muse_glue_led_state(led_state_t state) {
+     // Pairing, provisioning and unpair all move the LED; pick up their config.
+     keeper_kick(KEEP_RELOAD);
+ }
++
++bool muse_ota_is_enabled(void)
++{
++    return ota_is_enabled();
++}
++
++typedef struct {
++    muse_ota_apply_cb_t cb;
++    void *user;
++} muse_ota_bridge_t;
++
++static void muse_ota_bridge_cb(const ota_event_t *ev, void *user)
++{
++    muse_ota_bridge_t *b = user;
++    if (!b) {
++        return;
++    }
++    if (b->cb && ev) {
++        muse_ota_apply_event_t out = {
++            .result = ev->result == OTA_RESULT_APPLIED ? MUSE_OTA_APPLIED
++                      : (ev->result == OTA_RESULT_SKIPPED ? MUSE_OTA_SKIPPED : MUSE_OTA_FAILED),
++            .detail = ev->detail,
++            .new_version = ev->new_version,
++            .running_version = ev->running_version,
++        };
++        b->cb(&out, b->user);
++    }
++    free(b);
++}
++
++void muse_ota_apply(const char *url, bool force, muse_ota_apply_cb_t cb, void *user)
++{
++    muse_ota_bridge_t *b = NULL;
++    if (cb) {
++        b = calloc(1, sizeof(*b));
++        if (b) {
++            b->cb = cb;
++            b->user = user;
++        }
++    }
++    ota_start(url, force, b ? muse_ota_bridge_cb : NULL, b);
++    if (cb && !b) {
++        muse_ota_apply_event_t ev = { .result = MUSE_OTA_FAILED, .detail = "out of memory" };
++        cb(&ev, user);
++    }
++}
++
++typedef struct {
++    muse_ota_progress_cb_t cb;
++    void *user;
++} muse_ota_progress_bridge_t;
++
++static muse_ota_progress_bridge_t s_ota_progress;
++
++static void muse_ota_progress_bridge_cb(int percent, void *user)
++{
++    (void)user;
++    if (s_ota_progress.cb) {
++        s_ota_progress.cb(percent, s_ota_progress.user);
++    }
++}
++
++void muse_ota_set_progress_cb(muse_ota_progress_cb_t cb, void *user)
++{
++    s_ota_progress.cb = cb;
++    s_ota_progress.user = user;
++    ota_set_progress_cb(cb ? muse_ota_progress_bridge_cb : NULL, NULL);
++}
++
++int muse_ota_progress_percent(void)
++{
++    return ota_progress_percent();
++}
+diff --git a/esp32/main/ota.c b/esp32/main/ota.c
+index 9e4ec99..a7c20fa 100644
+--- a/esp32/main/ota.c
++++ b/esp32/main/ota.c
+@@ -58,6 +58,39 @@ typedef struct {
+     void *user;
+ } ota_ctx_t;
+ 
++static ota_progress_cb s_progress_cb;
++static void *s_progress_user;
++static volatile int s_progress_percent = -1;
++
++void ota_set_progress_cb(ota_progress_cb cb, void *user)
++{
++    s_progress_cb = cb;
++    s_progress_user = user;
++}
++
++int ota_progress_percent(void)
++{
++    return s_progress_percent;
++}
++
++static void report_progress(int percent)
++{
++    if (percent < 0) {
++        percent = 0;
++    }
++    if (percent > 100) {
++        percent = 100;
++    }
++    if (percent == s_progress_percent) {
++        return;
++    }
++    s_progress_percent = percent;
++    if (s_progress_cb) {
++        s_progress_cb(percent, s_progress_user);
++    }
++}
++
++
+ // Parse a leading "[v]MAJOR.MINOR.PATCH" into three components. Non-numeric
+ // suffixes (e.g. git-describe "-15-gabc-dirty") are ignored.
+ static void parse_ver(const char *s, long out[3]) {
+@@ -158,6 +191,8 @@ static void ota_task(void *arg) {
+     char user_agent[OTA_USER_AGENT_BYTES];
+     snprintf(user_agent, sizeof(user_agent), "HatchLink/%s", running);
+     ESP_LOGI(TAG, "begin OTA (force=%d, running=%s)", ctx->force, running);
++    s_progress_percent = 0;
++    report_progress(0);
+ 
+     const char *ota_url = ctx->url;
+     log_request_headers("ota download", "GET", ota_url, user_agent);
+@@ -209,9 +244,24 @@ static void ota_task(void *arg) {
+         goto done;
+     }
+ 
+-    while ((err = esp_https_ota_perform(handle)) == ESP_ERR_HTTPS_OTA_IN_PROGRESS) {
+-        // streaming; yield briefly between reads
+-        vTaskDelay(pdMS_TO_TICKS(1));
++    {
++        int last_pct = -1;
++        while ((err = esp_https_ota_perform(handle)) == ESP_ERR_HTTPS_OTA_IN_PROGRESS) {
++            int read = esp_https_ota_get_image_len_read(handle);
++            int total = esp_https_ota_get_image_size(handle);
++            int pct;
++            if (total > 0 && read >= 0) {
++                pct = (int)((int64_t)read * 100 / total);
++            } else {
++                /* Size unknown yet: pulse 1..9 so the bar is not stuck at 0. */
++                pct = (last_pct < 1) ? 1 : (last_pct < 9 ? last_pct + 1 : 9);
++            }
++            if (pct != last_pct) {
++                last_pct = pct;
++                report_progress(pct);
++            }
++            vTaskDelay(pdMS_TO_TICKS(1));
++        }
+     }
+     if (err != ESP_OK) {
+         char msg[96];
+@@ -239,6 +289,7 @@ static void ota_task(void *arg) {
+         goto done;
+     }
+ 
++    report_progress(100);
+     ESP_LOGI(TAG, "applied %s -> %s, rebooting", running, new_version);
+     emit(ctx, OTA_RESULT_APPLIED, "applied", new_version, running);
+     // Let any status notification flush before the reboot tears down the link.
+@@ -247,6 +298,9 @@ static void ota_task(void *arg) {
+     esp_restart();
+ 
+ done:
++    if (s_progress_percent >= 0 && s_progress_percent < 100) {
++        /* leave last value for UI failure messaging; clear after short delay via idle */
++    }
+     free(ctx->url);
+     free(ctx);
+     stack_monitor_record(NULL);
+@@ -287,6 +341,17 @@ void ota_start(const char *url, bool force, ota_status_cb cb, void *user) {
+ 
+ #else
+ 
++void ota_set_progress_cb(ota_progress_cb cb, void *user)
++{
++    (void)cb;
++    (void)user;
++}
++
++int ota_progress_percent(void)
++{
++    return -1;
++}
++
+ void ota_start(const char *url, bool force, ota_status_cb cb, void *user) {
+     (void)url;
+     (void)force;
+diff --git a/esp32/main/ota.h b/esp32/main/ota.h
+index 7fc3aa0..b20f097 100644
+--- a/esp32/main/ota.h
++++ b/esp32/main/ota.h
+@@ -36,9 +36,18 @@ typedef struct {
+ // `user` is the pointer passed to ota_start (caller-owned).
+ typedef void (*ota_status_cb)(const ota_event_t *ev, void *user);
+ 
++/* 0..100 while downloading/writing; called from the OTA task. May be NULL. */
++typedef void (*ota_progress_cb)(int percent, void *user);
++
+ // Whether this build accepts OTA updates (CONFIG_HOMEHUB_OTA_ENABLED).
+ bool ota_is_enabled(void);
+ 
++/* Optional progress reporter for the next/current ota_start (UI bar). */
++void ota_set_progress_cb(ota_progress_cb cb, void *user);
++
++/* Last reported percent, or -1 when idle / not started. */
++int ota_progress_percent(void);
++
+ // Download a firmware image from `url` (HTTPS) with the streaming esp_https_ota
+ // API. The incoming image's embedded descriptor is read first: unless `force`
+ // is set, the install is skipped when the image's version is not newer than the
+diff --git a/esp32/version.txt b/esp32/version.txt
+index 2b88371..65f5417 100644
+--- a/esp32/version.txt
++++ b/esp32/version.txt
+@@ -1 +1 @@
+-999.0.0
++999.1.2

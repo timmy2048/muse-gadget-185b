@@ -1,0 +1,6 @@
+﻿TTS FIX (one flash)
+===================
+- ID3 MP3 accepted (mp3_looks_valid)
+- URL chain: WG http://10.0.0.1:8787/tts?q= -> Baidu gettts -> Youdao -> Google -> embedded test_reply.mp3
+- Proxy script: tools/tts_wg_proxy.py (run on VPS = 10.0.0.1)
+- 8s HTTP timeout per try

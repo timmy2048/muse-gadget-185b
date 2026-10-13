@@ -1,0 +1,34 @@
+﻿DIAGNOSIS (no voice reply / speaker UI on)
+==========================================
+Hardware: OK
+- ES8311 Slave + ES7210 MIC1/MIC2 OK
+- muse_audio: audio ready 16kHz 2ch vol 100 mic 30dB
+- self-test loopback corr ~0.86–0.92 → PA/GPIO9 + speaker path works
+- No ES8311/ES7210 errors on voice turns
+
+Mic / upload: OK
+- muse_voice: recorded e.g. 0.62s / 3.12s, peak ~-0.7 dBFS
+- muse_chat_session: voice note → POST /chat/stream → chat/stream ack
+
+Reply path: BROKEN (primary)
+KEY LINE (wg_ws_capture.log):
+  W (...): muse_chat_session: stream 1: skipped a line over 262144 bytes
+- Stream 1 = POST /chat/subscribe (NDJSON events)
+- SUB_LINE_MAX was 256KB; long message_done / assistant events dropped whole line
+- After ack: no "showing message", no text/done/tts/mp3/audio marks, no "reply audio"
+- So hatch never queues a reply → nothing to play
+
+TTS/playback: BY DESIGN silent for Hatch
+- muse_chat_session start_tts() always sets s_turn.silent = true
+- Comment: "Muse doesn't speak gadget replies"; custom TTS API hook only
+- K_TTS stream kind exists but open_stream(K_TTS) is never called
+- Speaker On only unmutes PCM (muse_audio mute=!speaker_on); silence pacing → still no sound
+- UI speaker-on is NOT broken hardware
+
+FIX APPLIED
+- SUB_LINE_MAX 256KB → 1MB in muse_chat_session.cpp
+- Rebuilt + flashed COM3 (machineId 2306a0d9-b918-4b65-b92c-756df685d8f7) OK
+- Expect after fix: captions / "showing message" / turn marks; still NO spoken TTS unless start_tts wired to a TTS API
+
+NEXT (if still silent after captions appear)
+- Implement start_tts TTS fetch+mp3 path, or play test_reply.mp3 selftest to confirm user hears speaker

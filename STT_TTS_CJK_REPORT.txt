@@ -1,0 +1,48 @@
+﻿STT + TTS + CJK (Waveshare 185B) — what changed
+==============================================
+
+STT (speech-to-text)
+- Already using Muse/Hatch voice-note path (VOICE_NOTE=1): BOOT hold uploads
+  WAV on POST /chat/stream; Muse VM transcribes server-side.
+- GAP: streaming POST /api/voice/dictation has no ASR on the VM today
+  (explicit comment in muse_chat_session.cpp). Do not set VOICE_NOTE=0
+  expecting live partials until Muse enables ASR.
+- Prior fix kept: SUB_LINE_MAX 1MB so long reply NDJSON is not skipped.
+
+TTS (spoken replies)
+- Wired start_tts: when Speaker On, fetches MP3 from HTTP TTS and plays via
+  existing minimp3 / ES8311 path (was silent-by-design).
+- Default: Youdao dictvoice (ZH type=0 / EN type=1). Kconfig:
+  CONFIG_MUSE_TTS_HTTP, CONFIG_MUSE_TTS_URL_ZH, CONFIG_MUSE_TTS_URL_EN.
+- Speaker Off: caption silence pacing (unchanged).
+- Fallback: if TTS HTTP fails → silent captions + warning log.
+- Replies clipped to ~180 UTF-8 bytes per speak (Youdao URL limit).
+
+CJK (Chinese on screen)
+- Enabled CONFIG_MUSE_CJK_FONT=y (was unset → boxes/garbled).
+- Unifont 16x16 fallback for captions (~850 KB flash). Binary ~3.0 MB.
+
+Kept
+- WireGuard (sdkconfig.wg.local)
+- LCD RDID / ST77916 v2 probe on board_waveshare_s3_185b.c
+
+How to test
+1. Board awake, Speaker On (menu or button), volume > 0.
+2. Wait until WiFi+WG up (serial: wifi=up wg=up ws=up; hatch connected).
+3. Hold BOOT, speak a short Chinese phrase, release.
+4. Expect serial roughly:
+   - muse_voice: recorded …
+   - muse_chat_session: voice note: …
+   - chat/stream ack: …
+   - showing/speaking message …  (not only heartbeats)
+   - TTS HTTP 200 … got N bytes
+   - reply audio: … Hz
+5. Screen: Chinese captions readable (not □).
+6. Speaker: hear spoken reply (Youdao voice).
+7. If no sound but captions OK: check Speaker On, volume, and TTS HTTP status
+   in serial; Youdao must be reachable (China WiFi OK; or change TTS URL).
+
+Files
+- muse_chat_session.cpp (start_tts + HTTP TTS; SUB_LINE_MAX 1MB)
+- Kconfig (MUSE_TTS_*)
+- devices/sdkconfig.muse-waveshare-s3-185b, sdkconfig.wg.local (CJK+TTS)

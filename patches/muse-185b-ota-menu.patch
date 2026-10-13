@@ -1,0 +1,907 @@
+diff --git a/esp32/components/muse/CMakeLists.txt b/esp32/components/muse/CMakeLists.txt
+index c3e7013..7378f69 100644
+--- a/esp32/components/muse/CMakeLists.txt
++++ b/esp32/components/muse/CMakeLists.txt
+@@ -37,6 +37,7 @@ if(CONFIG_MUSE_ENABLED)
+         "muse_adpcm.c"
+         "muse_settings.c"
+         "muse_settings_ui.c"
++        "muse_ota_check.c"
+         "muse_text.c"
+         "muse_keypad.c"
+         "muse_lv_mem.c"
+@@ -65,6 +66,8 @@ if(CONFIG_MUSE_ENABLED)
+     if(CONFIG_MUSE_BOARD_WAVESHARE_S3_175C OR CONFIG_MUSE_BOARD_WAVESHARE_S3_175)
+         # One driver: the 1.75 differs only in pins (its BSP's) and its PWR key.
+         list(APPEND srcs "boards/board_waveshare_s3_175c.c" "boards/muse_lcd_bands.c")
++    elseif(CONFIG_MUSE_BOARD_WAVESHARE_S3_185B)
++        list(APPEND srcs "boards/board_waveshare_s3_185b.c" "boards/muse_lcd_bands.c")
+     elseif(CONFIG_MUSE_BOARD_WAVESHARE_S3_216)
+         list(APPEND srcs "boards/board_waveshare_s3_216.c" "boards/muse_lcd_bands.c")
+     elseif(CONFIG_MUSE_BOARD_AIPI)
+diff --git a/esp32/components/muse/Kconfig b/esp32/components/muse/Kconfig
+index 11a9aae..1ba5f99 100644
+--- a/esp32/components/muse/Kconfig
++++ b/esp32/components/muse/Kconfig
+@@ -35,6 +35,10 @@ menu "Muse"
+             bool "Waveshare ESP32-S3-Touch-AMOLED-1.75 (not the 1.75C)"
+             depends on IDF_TARGET_ESP32S3
+ 
++        config MUSE_BOARD_WAVESHARE_S3_185B
++            bool "Waveshare ESP32-S3-Touch-LCD-1.85B"
++            depends on IDF_TARGET_ESP32S3
++
+         config MUSE_BOARD_WAVESHARE_S3_216
+             bool "Waveshare ESP32-S3-Touch-AMOLED-2.16"
+             depends on IDF_TARGET_ESP32S3
+@@ -110,6 +114,7 @@ menu "Muse"
+         string
+         default "waveshare_s3_175c" if MUSE_BOARD_WAVESHARE_S3_175C
+         default "waveshare_s3_175" if MUSE_BOARD_WAVESHARE_S3_175
++        default "waveshare_s3_185b" if MUSE_BOARD_WAVESHARE_S3_185B
+         default "waveshare_s3_216" if MUSE_BOARD_WAVESHARE_S3_216
+         default "aipi" if MUSE_BOARD_AIPI
+         default "espressif_box_3" if MUSE_BOARD_ESPRESSIF_BOX_3
+@@ -190,4 +195,49 @@ menu "Muse"
+             them. Needs PSRAM. Without it, voice notes go over Home Link's own
+             session to its paired VM and replies are shown as text.
+ 
++
++    config MUSE_TTS_HTTP
++        bool "Speak replies via HTTP TTS (MP3)"
++        depends on MUSE_HATCH
++        default y
++        help
++            When the speaker is on, start_tts fetches an MP3 from the TTS URL
++            (reply text URL-encoded) and plays it through the existing minimp3
++            path. Speaker off keeps caption silence pacing. Muse/Hatch has no
++            built-in TTS; this uses an external HTTP endpoint (default: Google translate_tts (works via WireGuard; Youdao often 500)). Change MUSE_TTS_URL_ZH/EN if needed.
++
++    config MUSE_TTS_URL_ZH
++        string "TTS URL prefix for Chinese text"
++        depends on MUSE_TTS_HTTP
++        default "http://10.0.0.1:8787/tts?q="
++        help
++            Prefix only; the URL-encoded reply text is appended. Must return MP3.
++
++    config MUSE_TTS_URL_EN
++        string "TTS URL prefix for non-CJK text"
++        depends on MUSE_TTS_HTTP
++        default "http://10.0.0.1:8787/tts?q="
++        help
++            Used when the reply has no CJK. Must return MP3.
++
++
++    config MUSE_SCREEN_OFF_KEEP_LINK
++        bool "Keep Wi-Fi and Muse's session up while the screen is off"
++        depends on MUSE_ENABLED
++        default y if MUSE_BOARD_WAVESHARE_S3_185B
++        default n
++        help
++            Screen off (sleep timeout) only darkens and pauses the display.
++            Wi-Fi never naps (no disconnect after two minutes low power) and
++            rests at most in light modem sleep (WIFI_PS_MIN_MODEM), so the
++            tunnel and Muse's control session stay connected and waking needs
++            no reconnect. Costs more battery while dark.
++
++    config MUSE_OTA_MANIFEST_URL
++        string "OTA version manifest URL (check-for-update)"
++        depends on MUSE_ENABLED
++        default "http://10.0.0.1:8790/firmware/latest.json"
++        help
++            HTTP JSON with version/url/sha256/size/notes, served on the WireGuard
++            OTA host. Settings check-for-update fetches this and may call device OTA.
+ endmenu
+diff --git a/esp32/components/muse/muse_ota.h b/esp32/components/muse/muse_ota.h
+new file mode 100644
+index 0000000..c5c4efe
+--- /dev/null
++++ b/esp32/components/muse/muse_ota.h
+@@ -0,0 +1,75 @@
++/*
++ * On-device OTA check: fetch WG-local firmware/latest.json, compare versions,
++ * and hand a confirmed URL to Home Link's ota_start via muse_ota_apply.
++ */
++
++#pragma once
++
++#include <stdbool.h>
++#include <stddef.h>
++#include <stdint.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++#ifndef CONFIG_MUSE_OTA_MANIFEST_URL
++#define MUSE_OTA_MANIFEST_URL_DEFAULT "http://10.0.0.1:8790/firmware/latest.json"
++#else
++#define MUSE_OTA_MANIFEST_URL_DEFAULT CONFIG_MUSE_OTA_MANIFEST_URL
++#endif
++
++typedef enum {
++    MUSE_OTA_CHECK_IDLE = 0,
++    MUSE_OTA_CHECK_BUSY,
++    MUSE_OTA_CHECK_LATEST,
++    MUSE_OTA_CHECK_UPDATE,
++    MUSE_OTA_CHECK_ERROR,
++} muse_ota_check_state_t;
++
++typedef struct {
++    muse_ota_check_state_t state;
++    char running[32];
++    char remote[32];
++    char url[192];
++    char sha256[72];
++    char notes[96];
++    int64_t size;
++    char error[64];
++    bool boot_badge;   /* true once a newer remote was seen (boot or menu) */
++} muse_ota_check_info_t;
++
++/* Mirror of main/ota.h result for the Muse UI (implemented in muse_glue.c). */
++typedef enum {
++    MUSE_OTA_APPLIED = 0,
++    MUSE_OTA_SKIPPED,
++    MUSE_OTA_FAILED,
++} muse_ota_apply_result_t;
++
++typedef struct {
++    muse_ota_apply_result_t result;
++    const char *detail;
++    const char *new_version;
++    const char *running_version;
++} muse_ota_apply_event_t;
++
++typedef void (*muse_ota_apply_cb_t)(const muse_ota_apply_event_t *ev, void *user);
++
++bool muse_ota_is_enabled(void);
++void muse_ota_apply(const char *url, bool force, muse_ota_apply_cb_t cb, void *user);
++
++/* Snapshot of the last check (any task). */
++void muse_ota_check_get(muse_ota_check_info_t *out);
++
++/* Start a background HTTP GET of the manifest. Safe to call from UI. */
++void muse_ota_check_start(void);
++
++/* Once after boot: wait for IP, then check once for the settings badge. */
++void muse_ota_check_schedule_boot(void);
++
++/* Semver-ish compare shared with the menu (true if cand > cur). */
++bool muse_ota_version_is_newer(const char *cand, const char *cur);
++
++#ifdef __cplusplus
++}
++#endif
+diff --git a/esp32/components/muse/muse_ota_check.c b/esp32/components/muse/muse_ota_check.c
+new file mode 100644
+index 0000000..534840f
+--- /dev/null
++++ b/esp32/components/muse/muse_ota_check.c
+@@ -0,0 +1,319 @@
++/*
++ * Fetch http://10.0.0.1:8790/firmware/latest.json over WireGuard and compare
++ * to esp_app_get_description()->version. Applying an update goes through
++ * muse_ota_apply() (main/muse_glue.c ??ota_start).
++ */
++
++#include "muse_ota.h"
++
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++#include "cJSON.h"
++#include "esp_app_desc.h"
++#include "esp_http_client.h"
++#include "esp_log.h"
++#include "freertos/FreeRTOS.h"
++#include "freertos/task.h"
++#include "sdkconfig.h"
++
++static const char *TAG = "muse_ota";
++
++#define MANIFEST_MAX 2048
++#define BOOT_DELAY_MS 20000
++
++static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
++static muse_ota_check_info_t s_info;
++static volatile bool s_check_running;
++
++static void set_running_version(void)
++{
++    const esp_app_desc_t *d = esp_app_get_description();
++    strlcpy(s_info.running, d && d->version[0] ? d->version : "?", sizeof(s_info.running));
++}
++
++static void copy_info(muse_ota_check_info_t *out)
++{
++    portENTER_CRITICAL(&s_lock);
++    *out = s_info;
++    portEXIT_CRITICAL(&s_lock);
++}
++
++void muse_ota_check_get(muse_ota_check_info_t *out)
++{
++    if (!out) {
++        return;
++    }
++    copy_info(out);
++    if (!out->running[0]) {
++        const esp_app_desc_t *d = esp_app_get_description();
++        strlcpy(out->running, d && d->version[0] ? d->version : "?", sizeof(out->running));
++    }
++}
++
++bool muse_ota_version_is_newer(const char *cand, const char *cur)
++{
++    long a[3] = {0}, b[3] = {0};
++    const char *s = cand;
++    if (s && (*s == 'v' || *s == 'V')) {
++        s++;
++    }
++    for (int i = 0; i < 3 && s && *s; i++) {
++        char *end;
++        a[i] = strtol(s, &end, 10);
++        if (end == s) {
++            break;
++        }
++        s = end;
++        if (*s == '.') {
++            s++;
++        } else {
++            break;
++        }
++    }
++    s = cur;
++    if (s && (*s == 'v' || *s == 'V')) {
++        s++;
++    }
++    for (int i = 0; i < 3 && s && *s; i++) {
++        char *end;
++        b[i] = strtol(s, &end, 10);
++        if (end == s) {
++            break;
++        }
++        s = end;
++        if (*s == '.') {
++            s++;
++        } else {
++            break;
++        }
++    }
++    for (int i = 0; i < 3; i++) {
++        if (a[i] != b[i]) {
++            return a[i] > b[i];
++        }
++    }
++    if (cand && cur && strcmp(cand, cur) != 0) {
++        return true;
++    }
++    return false;
++}
++
++typedef struct {
++    char *buf;
++    size_t len;
++    size_t cap;
++} resp_t;
++
++static esp_err_t on_http(esp_http_client_event_t *evt)
++{
++    resp_t *r = evt->user_data;
++    if (evt->event_id != HTTP_EVENT_ON_DATA || !r || !r->buf) {
++        return ESP_OK;
++    }
++    if (r->len + evt->data_len >= r->cap) {
++        return ESP_OK;
++    }
++    memcpy(r->buf + r->len, evt->data, evt->data_len);
++    r->len += evt->data_len;
++    r->buf[r->len] = '\0';
++    return ESP_OK;
++}
++
++static void parse_manifest(const char *json, size_t len)
++{
++    cJSON *root = cJSON_ParseWithLength(json, len);
++    if (!root) {
++        portENTER_CRITICAL(&s_lock);
++        s_info.state = MUSE_OTA_CHECK_ERROR;
++        strlcpy(s_info.error, "manifest JSON", sizeof(s_info.error));
++        portEXIT_CRITICAL(&s_lock);
++        return;
++    }
++
++    const cJSON *ver = cJSON_GetObjectItem(root, "version");
++    const cJSON *url = cJSON_GetObjectItem(root, "url");
++    const cJSON *sha = cJSON_GetObjectItem(root, "sha256");
++    const cJSON *notes = cJSON_GetObjectItem(root, "notes");
++    const cJSON *size = cJSON_GetObjectItem(root, "size");
++
++    char remote[32] = {0};
++    char u[192] = {0};
++    char hash[72] = {0};
++    char note[96] = {0};
++    int64_t sz = -1;
++
++    if (cJSON_IsString(ver) && ver->valuestring) {
++        strlcpy(remote, ver->valuestring, sizeof(remote));
++    }
++    if (cJSON_IsString(url) && url->valuestring) {
++        strlcpy(u, url->valuestring, sizeof(u));
++    }
++    if (cJSON_IsString(sha) && sha->valuestring) {
++        strlcpy(hash, sha->valuestring, sizeof(hash));
++    }
++    if (cJSON_IsString(notes) && notes->valuestring) {
++        strlcpy(note, notes->valuestring, sizeof(note));
++    }
++    if (cJSON_IsNumber(size)) {
++        sz = (int64_t)size->valuedouble;
++    }
++    cJSON_Delete(root);
++
++    set_running_version();
++    bool newer = remote[0] && u[0] && muse_ota_version_is_newer(remote, s_info.running);
++
++    portENTER_CRITICAL(&s_lock);
++    strlcpy(s_info.remote, remote, sizeof(s_info.remote));
++    strlcpy(s_info.url, u, sizeof(s_info.url));
++    strlcpy(s_info.sha256, hash, sizeof(s_info.sha256));
++    strlcpy(s_info.notes, note, sizeof(s_info.notes));
++    s_info.size = sz;
++    s_info.error[0] = '\0';
++    if (!remote[0] || !u[0]) {
++        s_info.state = MUSE_OTA_CHECK_ERROR;
++        strlcpy(s_info.error, "manifest?????, sizeof(s_info.error));
++    } else if (newer) {
++        s_info.state = MUSE_OTA_CHECK_UPDATE;
++        s_info.boot_badge = true;
++    } else {
++        s_info.state = MUSE_OTA_CHECK_LATEST;
++    }
++    portEXIT_CRITICAL(&s_lock);
++
++    ESP_LOGI(TAG, "manifest remote=%s running=%s newer=%d url=%s", remote, s_info.running, (int)newer, u);
++}
++
++static void check_task(void *arg)
++{
++    (void)arg;
++    const char *manifest_url =
++#ifdef CONFIG_MUSE_OTA_MANIFEST_URL
++        CONFIG_MUSE_OTA_MANIFEST_URL;
++#else
++        MUSE_OTA_MANIFEST_URL_DEFAULT;
++#endif
++
++    portENTER_CRITICAL(&s_lock);
++    set_running_version();
++    s_info.state = MUSE_OTA_CHECK_BUSY;
++    s_info.error[0] = '\0';
++    portEXIT_CRITICAL(&s_lock);
++
++    char *buf = calloc(1, MANIFEST_MAX);
++    if (!buf) {
++        portENTER_CRITICAL(&s_lock);
++        s_info.state = MUSE_OTA_CHECK_ERROR;
++        strlcpy(s_info.error, "??????", sizeof(s_info.error));
++        portEXIT_CRITICAL(&s_lock);
++        s_check_running = false;
++        vTaskDelete(NULL);
++        return;
++    }
++    resp_t r = { .buf = buf, .len = 0, .cap = MANIFEST_MAX };
++
++    esp_http_client_config_t cfg = {
++        .url = manifest_url,
++        .timeout_ms = 15000,
++        .buffer_size = 1024,
++        .buffer_size_tx = 1024,
++        .event_handler = on_http,
++        .user_data = &r,
++        .keep_alive_enable = true,
++    };
++    esp_http_client_handle_t c = esp_http_client_init(&cfg);
++    if (!c) {
++        free(buf);
++        portENTER_CRITICAL(&s_lock);
++        s_info.state = MUSE_OTA_CHECK_ERROR;
++        strlcpy(s_info.error, "HTTP????????, sizeof(s_info.error));
++        portEXIT_CRITICAL(&s_lock);
++        s_check_running = false;
++        vTaskDelete(NULL);
++        return;
++    }
++
++    esp_err_t err = esp_http_client_perform(c);
++    int status = esp_http_client_get_status_code(c);
++    esp_http_client_cleanup(c);
++
++    if (err != ESP_OK || status != 200 || r.len == 0) {
++        ESP_LOGW(TAG, "manifest fetch err=%s status=%d len=%u", esp_err_to_name(err), status, (unsigned)r.len);
++        portENTER_CRITICAL(&s_lock);
++        s_info.state = MUSE_OTA_CHECK_ERROR;
++        if (status == 0) {
++            strlcpy(s_info.error, "????????, sizeof(s_info.error));
++        } else {
++            snprintf(s_info.error, sizeof(s_info.error), "HTTP %d", status);
++        }
++        portEXIT_CRITICAL(&s_lock);
++    } else {
++        parse_manifest(buf, r.len);
++    }
++    free(buf);
++    s_check_running = false;
++    vTaskDelete(NULL);
++}
++
++void muse_ota_check_start(void)
++{
++    if (!muse_ota_is_enabled()) {
++        portENTER_CRITICAL(&s_lock);
++        set_running_version();
++        s_info.state = MUSE_OTA_CHECK_ERROR;
++        strlcpy(s_info.error, "OTA?????, sizeof(s_info.error));
++        portEXIT_CRITICAL(&s_lock);
++        return;
++    }
++    if (s_check_running) {
++        return;
++    }
++    s_check_running = true;
++    if (xTaskCreate(check_task, "ota_chk", 6144, NULL, 4, NULL) != pdPASS) {
++        s_check_running = false;
++        portENTER_CRITICAL(&s_lock);
++        s_info.state = MUSE_OTA_CHECK_ERROR;
++        strlcpy(s_info.error, "??????????, sizeof(s_info.error));
++        portEXIT_CRITICAL(&s_lock);
++    }
++}
++
++static void boot_task(void *arg)
++{
++    (void)arg;
++    vTaskDelay(pdMS_TO_TICKS(BOOT_DELAY_MS));
++    muse_ota_check_start();
++    vTaskDelete(NULL);
++}
++
++void muse_ota_check_schedule_boot(void)
++{
++    static bool once;
++    if (once || !muse_ota_is_enabled()) {
++        return;
++    }
++    once = true;
++    xTaskCreate(boot_task, "ota_boot", 3072, NULL, 3, NULL);
++}
++
++/* Weak stubs: muse_glue.c provides the real ones when Link OTA is linked. */
++__attribute__((weak)) bool muse_ota_is_enabled(void)
++{
++    return false;
++}
++
++__attribute__((weak)) void muse_ota_apply(const char *url, bool force, muse_ota_apply_cb_t cb, void *user)
++{
++    (void)url;
++    (void)force;
++    if (cb) {
++        muse_ota_apply_event_t ev = {
++            .result = MUSE_OTA_SKIPPED,
++            .detail = "OTA glue missing",
++            .new_version = NULL,
++            .running_version = esp_app_get_description()->version,
++        };
++        cb(&ev, user);
++    }
++}
+diff --git a/esp32/components/muse/muse_settings_ui.c b/esp32/components/muse/muse_settings_ui.c
+index 01d294b..1c8e0ff 100644
+--- a/esp32/components/muse/muse_settings_ui.c
++++ b/esp32/components/muse/muse_settings_ui.c
+@@ -38,6 +38,11 @@
+ #include "muse_ui.h"
+ #include "muse_voice.h"
+ #include "muse_wifi.h"
++#include "muse_ota.h"
++
++#if CONFIG_MUSE_CJK_FONT
++LV_FONT_DECLARE(muse_font_cjk_16)
++#endif
+ 
+ /* Keep content in a column that stays inside a round panel (and fits a 368 px one). */
+ #define LIST_W 330
+@@ -60,7 +65,7 @@ typedef void (*text_done_cb_t)(const char *text);
+ static int s_text_scale = 466;
+ static lv_obj_t *s_tile;
+ static lv_obj_t *s_current;
+-static lv_obj_t *s_home, *s_wifi, *s_hatch, *s_ble, *s_sound, *s_sleep, *s_battery, *s_power, *s_text;
++static lv_obj_t *s_home, *s_wifi, *s_hatch, *s_ble, *s_sound, *s_sleep, *s_battery, *s_power, *s_update, *s_text;
+ 
+ /*
+  * Only home is kept. A sub-page is built when it opens and deleted on the way
+@@ -73,7 +78,7 @@ typedef struct {
+ } page_t;
+ 
+ /* Home values. */
+-static lv_obj_t *s_home_wifi, *s_home_hatch, *s_home_ble, *s_home_sound, *s_home_sleep, *s_home_battery, *s_about;
++static lv_obj_t *s_home_wifi, *s_home_hatch, *s_home_ble, *s_home_sound, *s_home_sleep, *s_home_battery, *s_home_update, *s_about;
+ 
+ /* Wi-Fi page. */
+ static lv_obj_t *s_wifi_sw, *s_wifi_status, *s_wifi_saved, *s_wifi_scan_btn, *s_wifi_scan_lbl, *s_wifi_list;
+@@ -108,6 +113,11 @@ static lv_obj_t *s_batt_status, *s_batt_level, *s_batt_drain, *s_batt_full, *s_b
+     *s_batt_busy, *s_batt_awake;
+ static int64_t s_batt_shown_us;
+ 
++/* Update / OTA page. */
++static lv_obj_t *s_upd_status, *s_upd_detail, *s_upd_check_lbl, *s_upd_confirm_btn, *s_upd_confirm_lbl;
++static muse_ota_check_state_t s_upd_shown = (muse_ota_check_state_t)-1;
++static bool s_upd_applying;
++
+ /* Text entry page. */
+ static lv_obj_t *s_text_title, *s_text_ta;
+ static lv_obj_t *s_text_kp;                 /* a screen under 2" */
+@@ -139,6 +149,49 @@ static void set_text(lv_obj_t *l, const char *text)
+     }
+ }
+ 
++
++#if CONFIG_MUSE_CJK_FONT
++/* Montserrat for Latin + Unifont CJK fallback so ???????etc. render. */
++static const lv_font_t *ui_cjk_font(void)
++{
++    static lv_font_t font;
++    static bool ready;
++    if (!ready) {
++        font = lv_font_montserrat_16;
++        font.fallback = &muse_font_cjk_16;
++        ready = true;
++    }
++    return &font;
++}
++
++static const lv_font_t *ui_cjk_font_lg(void)
++{
++    static lv_font_t font;
++    static bool ready;
++    if (!ready) {
++        font = lv_font_montserrat_20;
++        font.fallback = &muse_font_cjk_16;
++        ready = true;
++    }
++    return &font;
++}
++
++static void set_text_cjk(lv_obj_t *l, const char *text)
++{
++    if (!l || !text) {
++        return;
++    }
++    if (strcmp(lv_label_get_text(l), text) != 0) {
++        lv_label_set_text(l, text);
++    }
++}
++#else
++static const lv_font_t *ui_cjk_font(void) { return &lv_font_montserrat_16; }
++static const lv_font_t *ui_cjk_font_lg(void) { return &lv_font_montserrat_20; }
++static void set_text_cjk(lv_obj_t *l, const char *text) { set_text(l, text); }
++#endif
++
++
+ static lv_obj_t *note(lv_obj_t *list, const char *text)
+ {
+     lv_obj_t *l = label(list, &lv_font_montserrat_16, COLOR_DIM, text);
+@@ -359,7 +412,7 @@ static lv_obj_t *info_row(lv_obj_t *list, const char *text)
+ 
+ static void drop(lv_obj_t *p)
+ {
+-    lv_obj_t **const pages[] = { &s_wifi, &s_hatch, &s_ble, &s_sound, &s_sleep, &s_battery, &s_power, &s_text };
++    lv_obj_t **const pages[] = { &s_wifi, &s_hatch, &s_ble, &s_sound, &s_sleep, &s_battery, &s_power, &s_update, &s_text };
+     for (size_t i = 0; i < sizeof(pages) / sizeof(pages[0]); i++) {
+         if (*pages[i] == p) {
+             *pages[i] = NULL;
+@@ -1211,6 +1264,164 @@ static void tick_battery(void)
+     set_text(s_batt_awake, buf);
+ }
+ 
++
++/* ---------- Update (OTA check) ---------- */
++
++static void on_ota_apply_done(const muse_ota_apply_event_t *ev, void *user)
++{
++    (void)user;
++    s_upd_applying = false;
++    if (!ev) {
++        return;
++    }
++    if (ev->result == MUSE_OTA_APPLIED) {
++        if (s_upd_status) {
++            set_text_cjk(s_upd_status, "????????????????);
++        }
++        muse_state_set_caption("OTA OK, rebooting");
++    } else if (ev->result == MUSE_OTA_SKIPPED) {
++        if (s_upd_status) {
++            set_text_cjk(s_upd_status, "???????????????");
++        }
++    } else {
++        char buf[128];
++        snprintf(buf, sizeof(buf), "????????.80s", ev->detail ? ev->detail : "?");
++        if (s_upd_status) {
++            set_text_cjk(s_upd_status, buf);
++        }
++        muse_state_set_caption("OTA failed");
++    }
++    s_upd_shown = (muse_ota_check_state_t)-1;
++}
++
++static void on_update_check(lv_event_t *e)
++{
++    (void)e;
++    if (s_upd_applying) {
++        return;
++    }
++    muse_ota_check_start();
++    s_upd_shown = (muse_ota_check_state_t)-1;
++}
++
++static void on_update_confirm(lv_event_t *e)
++{
++    (void)e;
++    if (s_upd_applying) {
++        return;
++    }
++    muse_ota_check_info_t info;
++    muse_ota_check_get(&info);
++    if (info.state != MUSE_OTA_CHECK_UPDATE || !info.url[0]) {
++        return;
++    }
++    s_upd_applying = true;
++    if (s_upd_status) {
++        set_text_cjk(s_upd_status, "???????????????????);
++    }
++    if (s_upd_detail) {
++        char buf[128];
++        snprintf(buf, sizeof(buf), "%s ??%s", info.running, info.remote);
++        set_text_cjk(s_upd_detail, buf);
++    }
++    if (s_upd_confirm_btn) {
++        lv_obj_add_flag(s_upd_confirm_btn, LV_OBJ_FLAG_HIDDEN);
++    }
++    muse_state_set_caption("OTA downloading??);
++    /* force=false: ota_start still gates on embedded image version. */
++    muse_ota_apply(info.url, false, on_ota_apply_done, NULL);
++}
++
++static void build_update_page(lv_obj_t *tile)
++{
++    lv_obj_t *list;
++    s_update = page(tile, "UPDATE", true, &list);
++    /* Title above is ASCII-safe via showable; replace with CJK after create. */
++    lv_obj_t *title = lv_obj_get_child(s_update, 0);
++    if (title && lv_obj_check_type(title, &lv_label_class)) {
++        lv_obj_set_style_text_font(title, ui_cjk_font_lg(), 0);
++        lv_label_set_text(title, "???????);
++    }
++    s_upd_status = note(list, "");
++    lv_obj_set_style_text_font(s_upd_status, ui_cjk_font(), 0);
++    s_upd_detail = note(list, "");
++    lv_obj_set_style_text_font(s_upd_detail, ui_cjk_font(), 0);
++    button(list, "Check", COLOR_ACCENT, on_update_check, &s_upd_check_lbl);
++    if (s_upd_check_lbl) {
++        lv_obj_set_style_text_font(s_upd_check_lbl, ui_cjk_font_lg(), 0);
++        set_text_cjk(s_upd_check_lbl, "???????);
++    }
++    s_upd_confirm_btn = button(list, "Upgrade", COLOR_WARN, on_update_confirm, &s_upd_confirm_lbl);
++    if (s_upd_confirm_lbl) {
++        lv_obj_set_style_text_font(s_upd_confirm_lbl, ui_cjk_font_lg(), 0);
++        set_text_cjk(s_upd_confirm_lbl, "??????");
++    }
++    lv_obj_add_flag(s_upd_confirm_btn, LV_OBJ_FLAG_HIDDEN);
++    s_upd_shown = (muse_ota_check_state_t)-1;
++    s_upd_applying = false;
++}
++
++static void tick_update(void)
++{
++    if (s_upd_applying) {
++        return;
++    }
++    muse_ota_check_info_t info;
++    muse_ota_check_get(&info);
++    if (info.state == s_upd_shown) {
++        return;
++    }
++    s_upd_shown = info.state;
++    char detail[192];
++    detail[0] = '\0';
++    switch (info.state) {
++    case MUSE_OTA_CHECK_IDLE:
++        set_text_cjk(s_upd_status, "??????????????????");
++        snprintf(detail, sizeof(detail), "??? %s", info.running[0] ? info.running : "?");
++        lv_obj_add_flag(s_upd_confirm_btn, LV_OBJ_FLAG_HIDDEN);
++        break;
++    case MUSE_OTA_CHECK_BUSY:
++        set_text_cjk(s_upd_status, "?????????);
++        snprintf(detail, sizeof(detail), "??? %s", info.running);
++        lv_obj_add_flag(s_upd_confirm_btn, LV_OBJ_FLAG_HIDDEN);
++        break;
++    case MUSE_OTA_CHECK_LATEST:
++        set_text_cjk(s_upd_status, "???????);
++        snprintf(detail, sizeof(detail), "??? %s", info.running);
++        lv_obj_add_flag(s_upd_confirm_btn, LV_OBJ_FLAG_HIDDEN);
++        break;
++    case MUSE_OTA_CHECK_UPDATE:
++        {
++            char msg[128];
++            snprintf(msg, sizeof(msg), "????????%.40s?????????", info.remote);
++            set_text_cjk(s_upd_status, msg);
++            if (info.notes[0]) {
++                snprintf(detail, sizeof(detail), "%s -> %s\n%.80s", info.running, info.remote, info.notes);
++            } else if (info.size > 0) {
++                snprintf(detail, sizeof(detail), "%s -> %s (%lld KB)", info.running, info.remote,
++                         (long long)(info.size / 1024));
++            } else {
++                snprintf(detail, sizeof(detail), "%s -> %s", info.running, info.remote);
++            }
++            set_text_cjk(s_upd_confirm_lbl, "??????");
++            lv_obj_remove_flag(s_upd_confirm_btn, LV_OBJ_FLAG_HIDDEN);
++        }
++        break;
++    case MUSE_OTA_CHECK_ERROR:
++    default:
++        {
++            char msg[128];
++            snprintf(msg, sizeof(msg), "????????%.80s", info.error[0] ? info.error : "?");
++            set_text_cjk(s_upd_status, msg);
++            snprintf(detail, sizeof(detail), "??? %s", info.running);
++            lv_obj_add_flag(s_upd_confirm_btn, LV_OBJ_FLAG_HIDDEN);
++        }
++        break;
++    }
++    set_text_cjk(s_upd_detail, detail);
++}
++
++
+ /* ---------- Power ---------- */
+ 
+ static void on_power_off(lv_event_t *e)
+@@ -1245,6 +1456,7 @@ static const page_t SOUND = { &s_sound, build_sound_page };
+ static const page_t SLEEP = { &s_sleep, build_sleep_page };
+ static const page_t BATTERY = { &s_battery, build_battery_page };
+ static const page_t POWER = { &s_power, build_power_page };
++static const page_t UPDATE = { &s_update, build_update_page };
+ 
+ static void build_home(lv_obj_t *tile)
+ {
+@@ -1256,6 +1468,18 @@ static void build_home(lv_obj_t *tile)
+     row(list, LV_SYMBOL_VOLUME_MAX, "Sound", &s_home_sound, on_nav, (void *)&SOUND);
+     row(list, LV_SYMBOL_EYE_CLOSE, "Sleep", &s_home_sleep, on_nav, (void *)&SLEEP);
+     row(list, LV_SYMBOL_BATTERY_FULL, "Battery", &s_home_battery, on_nav, (void *)&BATTERY);
++    row(list, LV_SYMBOL_DOWNLOAD, "Check update", &s_home_update, on_nav, (void *)&UPDATE);
++    /* Prefer Chinese label when CJK font is compiled in. */
++    {
++        lv_obj_t *upd_row = lv_obj_get_child(list, lv_obj_get_child_cnt(list) - 1); /* Check update row just added */
++        if (upd_row) {
++            lv_obj_t *txt = lv_obj_get_child(upd_row, 1);
++            if (txt && lv_obj_check_type(txt, &lv_label_class)) {
++                lv_obj_set_style_text_font(txt, ui_cjk_font_lg(), 0);
++                set_text_cjk(txt, "???????);
++            }
++        }
++    }
+     row(list, LV_SYMBOL_POWER, "Power off", NULL, on_nav, (void *)&POWER);
+     s_about = note(list, "");
+ }
+@@ -1291,6 +1515,21 @@ static void tick_home(void)
+     }
+     set_text(s_home_battery, buf);
+ 
++    {
++        muse_ota_check_info_t oi;
++        muse_ota_check_get(&oi);
++        if (oi.boot_badge && oi.remote[0]) {
++            char b[40];
++            snprintf(b, sizeof(b), "??%s", oi.remote);
++            if (s_home_update) {
++                lv_obj_set_style_text_font(s_home_update, ui_cjk_font(), 0);
++                set_text_cjk(s_home_update, b);
++            }
++        } else if (s_home_update) {
++            set_text(s_home_update, "");
++        }
++    }
++
+     snprintf(buf, sizeof(buf), "Muse %s  -  %s", esp_app_get_description()->version,
+              w.state == MUSE_WIFI_CONNECTED ? w.ip : "offline");
+     set_text(s_about, buf);
+@@ -1333,6 +1572,8 @@ void muse_settings_ui_tick(bool visible)
+         tick_sleep();
+     } else if (s_current == s_battery) {
+         tick_battery();
++    } else if (s_current == s_update) {
++        tick_update();
+     }
+ }
+ 
+diff --git a/esp32/main/muse_glue.c b/esp32/main/muse_glue.c
+index 51cba9a..401f2a2 100644
+--- a/esp32/main/muse_glue.c
++++ b/esp32/main/muse_glue.c
+@@ -42,6 +42,8 @@
+ #include "muse_mem.h"
+ #include "muse_settings.h"
+ #include "muse_state.h"
++#include "muse_ota.h"
++#include "ota.h"
+ 
+ static const char *TAG = "link.muse";
+ 
+@@ -639,6 +641,7 @@ void muse_glue_storage_ready(void) {
+ }
+ 
+ void muse_glue_link_ready(void) {
++    muse_ota_check_schedule_boot();
+     xEventGroupSetBits(s_ready, BIT_LINK);
+ }
+ 
+@@ -680,3 +683,49 @@ void muse_glue_led_state(led_state_t state) {
+     // Pairing, provisioning and unpair all move the LED; pick up their config.
+     keeper_kick(KEEP_RELOAD);
+ }
++
++bool muse_ota_is_enabled(void)
++{
++    return ota_is_enabled();
++}
++
++typedef struct {
++    muse_ota_apply_cb_t cb;
++    void *user;
++} muse_ota_bridge_t;
++
++static void muse_ota_bridge_cb(const ota_event_t *ev, void *user)
++{
++    muse_ota_bridge_t *b = user;
++    if (!b) {
++        return;
++    }
++    if (b->cb && ev) {
++        muse_ota_apply_event_t out = {
++            .result = ev->result == OTA_RESULT_APPLIED ? MUSE_OTA_APPLIED
++                      : (ev->result == OTA_RESULT_SKIPPED ? MUSE_OTA_SKIPPED : MUSE_OTA_FAILED),
++            .detail = ev->detail,
++            .new_version = ev->new_version,
++            .running_version = ev->running_version,
++        };
++        b->cb(&out, b->user);
++    }
++    free(b);
++}
++
++void muse_ota_apply(const char *url, bool force, muse_ota_apply_cb_t cb, void *user)
++{
++    muse_ota_bridge_t *b = NULL;
++    if (cb) {
++        b = calloc(1, sizeof(*b));
++        if (b) {
++            b->cb = cb;
++            b->user = user;
++        }
++    }
++    ota_start(url, force, b ? muse_ota_bridge_cb : NULL, b);
++    if (cb && !b) {
++        muse_ota_apply_event_t ev = { .result = MUSE_OTA_FAILED, .detail = "out of memory" };
++        cb(&ev, user);
++    }
++}
+\ No newline at end of file
+diff --git a/esp32/version.txt b/esp32/version.txt
+index 2b88371..d791b94 100644
+--- a/esp32/version.txt
++++ b/esp32/version.txt
+@@ -1 +1 @@
+-999.0.0
++999.1.1
