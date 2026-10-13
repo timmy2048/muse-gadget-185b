@@ -25,8 +25,8 @@
  * never overridden by the remote file. Outside trading hours polling stops
  * to save power. On-board edits via the manager apply instantly.
  *
- * Quotes in this preview are DEMO data. The real quote feed plugs into
- * stock_quote_refresh() later.
+ * Quotes are live from Yahoo Finance (same source as the iPhone Stocks app).
+ * On fetch failure the last demo fallback fills in so the UI never blanks.
  *
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  * Licensed under the Apache License, Version 2.0.
