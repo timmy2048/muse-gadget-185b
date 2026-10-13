@@ -1,5 +1,5 @@
 /*
- * On-device OTA check: fetch WG-local firmware/latest.json, compare versions,
+ * On-device OTA check: fetch public GitHub Release latest.json, compare versions,
  * and hand a confirmed URL to Home Link's ota_start via muse_ota_apply.
  */
 
@@ -14,7 +14,7 @@ extern "C" {
 #endif
 
 #ifndef CONFIG_MUSE_OTA_MANIFEST_URL
-#define MUSE_OTA_MANIFEST_URL_DEFAULT "http://10.0.0.1:8790/firmware/latest.json"
+#define MUSE_OTA_MANIFEST_URL_DEFAULT "https://github.com/timmy2048/muse-gadget-185b/releases/latest/download/latest.json"
 #else
 #define MUSE_OTA_MANIFEST_URL_DEFAULT CONFIG_MUSE_OTA_MANIFEST_URL
 #endif

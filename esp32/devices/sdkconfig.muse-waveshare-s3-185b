@@ -68,3 +68,6 @@ CONFIG_MUSE_CJK_FONT=y
 CONFIG_MUSE_TTS_HTTP=y
 CONFIG_MUSE_TTS_URL_ZH="http://10.0.0.1:8787/tts?q="
 CONFIG_MUSE_TTS_URL_EN="http://10.0.0.1:8787/tts?q="
+
+# OTA manifest (public GitHub Releases)
+CONFIG_MUSE_OTA_MANIFEST_URL="https://github.com/timmy2048/muse-gadget-185b/releases/latest/download/latest.json"

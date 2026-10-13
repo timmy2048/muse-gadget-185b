@@ -236,7 +236,7 @@ menu "Muse"
     config MUSE_OTA_MANIFEST_URL
         string "OTA version manifest URL (check-for-update)"
         depends on MUSE_ENABLED
-        default "http://10.0.0.1:8790/firmware/latest.json"
+        default "https://github.com/timmy2048/muse-gadget-185b/releases/latest/download/latest.json"
         help
             HTTP JSON with version/url/sha256/size/notes, served on the WireGuard
             OTA host. Settings check-for-update fetches this and may call device OTA.

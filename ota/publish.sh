@@ -1,3 +1,4 @@
+# OPTIONAL legacy VPS path (WG-only 10.0.0.1:8790). Prefer publish_github.sh.
 #!/bin/bash
 # Usage: publish.sh /path/to/muse-gadget.bin [version-label]
 # Copies signed app bin into WG-only OTA tree, writes latest.json, prints URLs.

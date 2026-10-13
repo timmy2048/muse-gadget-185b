@@ -1,5 +1,5 @@
 /*
- * Fetch http://10.0.0.1:8790/firmware/latest.json over WireGuard and compare
+ * Fetch public GitHub Release latest.json (HTTPS over WireGuard) and compare
  * to esp_app_get_description()->version. Applying an update goes through
  * muse_ota_apply() (main/muse_glue.c → ota_start).
  */
@@ -12,6 +12,7 @@
 
 #include "cJSON.h"
 #include "esp_app_desc.h"
+#include "esp_crt_bundle.h"
 #include "esp_http_client.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -215,12 +216,14 @@ static void check_task(void *arg)
 
     esp_http_client_config_t cfg = {
         .url = manifest_url,
-        .timeout_ms = 15000,
+        .timeout_ms = 30000,
         .buffer_size = 1024,
         .buffer_size_tx = 1024,
         .event_handler = on_http,
         .user_data = &r,
         .keep_alive_enable = true,
+        .crt_bundle_attach = esp_crt_bundle_attach,
+        .max_redirection_count = 5,
     };
     esp_http_client_handle_t c = esp_http_client_init(&cfg);
     if (!c) {

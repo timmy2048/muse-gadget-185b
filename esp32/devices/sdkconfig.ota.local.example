@@ -1,0 +1,4 @@
+# Optional OTA overrides. Copy to sdkconfig.ota.local (gitignored) if needed.
+# Public GitHub Releases need NO download token.
+
+CONFIG_MUSE_OTA_MANIFEST_URL="https://github.com/timmy2048/muse-gadget-185b/releases/latest/download/latest.json"
