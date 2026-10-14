@@ -1457,6 +1457,27 @@ static char *build_register_json(void) {
                     "Add/complete/remove/clear/replace chat-driven todos on the gadget.",
                     todo_required, todo_optional);
     }
+    {
+        cJSON *stock_required = cJSON_CreateObject();
+        cJSON *op_param = cJSON_CreateObject();
+        cJSON_AddStringToObject(op_param, "type", "string");
+        cJSON_AddStringToObject(op_param, "description",
+            "Stock op: add | remove | clear | replace. "
+            "Chat can also embed <<<MUSE_STOCK{\"op\":\"add\",\"symbol\":\"AAPL\"}>>> markers.");
+        cJSON_AddItemToObject(stock_required, "op", op_param);
+        cJSON *stock_optional = cJSON_CreateObject();
+        cJSON *sym_p = cJSON_CreateObject();
+        cJSON_AddStringToObject(sym_p, "type", "string");
+        cJSON_AddStringToObject(sym_p, "description", "Ticker symbol, e.g. AAPL / META / SPCX.");
+        cJSON_AddItemToObject(stock_optional, "symbol", sym_p);
+        cJSON *syms_p = cJSON_CreateObject();
+        cJSON_AddStringToObject(syms_p, "type", "array");
+        cJSON_AddStringToObject(syms_p, "description", "Full symbol list for replace op.");
+        cJSON_AddItemToObject(stock_optional, "symbols", syms_p);
+        add_command(commands, "device.stock",
+                    "Add/remove/clear/replace the on-device stock watchlist (NVS).",
+                    stock_required, stock_optional);
+    }
 #endif
 
     cJSON_AddItemToObject(params, "commands_v2", commands);

@@ -27,6 +27,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
+#include "freertos/idf_additions.h"
 #include "lwip/netif.h"
 #include "lwip/netifapi.h"
 #include "lwip/pbuf.h"
@@ -295,11 +296,26 @@ bool tunnel_netif_start(const ip4_addr_t *ip,
         tx_item_t *p = &s_tx_slots[i];
         xQueueSend(s_tx_free_queue, &p, 0);
     }
-    if (!s_tx_task
-        && xTaskCreate(tx_task, "tun_tx", TX_TASK_STACK, NULL, TX_TASK_PRIO,
-                       &s_tx_task) != pdPASS) {
-        ESP_LOGE(TAG, "xTaskCreate failed");
-        return false;
+    /* Stack in PSRAM: with stock/todo pages the internal heap largest block
+     * is often too small for TX_TASK_STACK (4 KiB), which left raw=down
+     * ("xTaskCreate failed") even when control WS was up. */
+    if (!s_tx_task) {
+        BaseType_t ok = pdFAIL;
+#if CONFIG_SPIRAM
+        ok = xTaskCreateWithCaps(tx_task, "tun_tx", TX_TASK_STACK, NULL,
+                                 TX_TASK_PRIO, &s_tx_task, MALLOC_CAP_SPIRAM);
+#endif
+        if (ok != pdPASS) {
+            ok = xTaskCreate(tx_task, "tun_tx", TX_TASK_STACK, NULL,
+                             TX_TASK_PRIO, &s_tx_task);
+        }
+        if (ok != pdPASS) {
+            ESP_LOGE(TAG, "xTaskCreate failed (int free=%u largest=%u psram=%u)",
+                     (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                     (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
+                     (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+            return false;
+        }
     }
 
     err_t err = netifapi_netif_add(&s_netif, ip, netmask, gw,

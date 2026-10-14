@@ -38,6 +38,12 @@
 
 #include "lvgl.h"
 
+#include "muse_stock_cmd.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Build the stocks tile content. LVGL task only. */
 void muse_stock_build(lv_obj_t *tile, int w, int h);
 /* Slide the tileview to the stocks tile (quotes view). LVGL task only. */
@@ -66,3 +72,14 @@ void muse_stock_text_char(char c);
 void muse_stock_text_backspace(void);
 void muse_stock_text_done(void);
 void muse_stock_text_cancel(void);
+
+/* Apply structured command (device.stock / chat marker). Any task; UI refresh deferred. */
+int muse_stock_apply_cmd(const muse_stock_cmd_t *cmd);
+/* Scan assistant text for <<<MUSE_STOCK...>>> markers, apply, strip in place. */
+int muse_stock_apply_chat_markers(char *text);
+/* Watchlist count (NVS-backed). */
+int muse_stock_count(void);
+
+#ifdef __cplusplus
+}
+#endif

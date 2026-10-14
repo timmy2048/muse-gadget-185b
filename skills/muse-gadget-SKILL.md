@@ -94,7 +94,7 @@ description: >-
 ## 11. Chat-driven Todos（999.2.6+）
 1. **UI**：主页继续左滑 → Settings → Stocks → **TODO**（圆屏深色+紫强调，对齐 mock）。
 2. **同步**：跟 Muse 说「提醒我明天 10 点开会」等；Muse 回复里带 `<<<MUSE_TODO{"op":"add","title":"…","due":unix}>>>` 板子会解析并写入 NVS（namespace `todo` / key `list`，不碰其它 NVS）。也可用 `link.invoke` → **`device.todo`**（op=add|complete|remove|clear|replace）。另可轮询仓库根 `todos.json`（与 watchlist 同模式；本地 NVS 优先）。
-3. **提醒**：NTP 对时后，到点弹窗 + **蜂鸣（chirp）+ TTS**（本 SKU 无振动马达）。点「完成」或「稍后」（+10 分钟）。
+3. **提醒**：NTP 对时后，到点弹窗 + **蜂鸣（chirp）+ TTS**（本 SKU 无振动马达）。点「完成」或「稍后」（+10 分钟）。**已完成不显示**（仍存 NVS）；**过期仍显示**直至完成。
 4. **发版**：抬 `esp32/version.txt` → 编译（`sdkconfig.wg.local` + `sdkconfig.token.local` + `dev_signing_key.pem`）→ `ota/publish_github.sh`。WG 端口保持 **UDP 51820**。
 
 ## 9. 排障速查
@@ -110,3 +110,16 @@ description: >-
 | OTA 确认后 0% 回主页 / 仍旧版本 | `latest.json` 标签与 bin 内 `esp_app_desc.version` 不一致 → `force=false` SKIPPED；用 `publish.sh`（已校验 embed==label）发正确 `PROJECT_VER` |
 | 语音转写跑偏 / STT drift | 已知后续：查 Muse 云端转写与麦/降噪；非 IME 问题 |
 | 手机 VLESS 超时 | 勿误重启 x-ui；查孤儿 xray |
+
+## 13. Chat-driven Stocks (999.2.14+)
+1. **Same pattern as todos**: Muse reply embeds `<<<MUSE_STOCK{...}>>>`; board parses, writes NVS namespace `stock` / key `watchlist`, refreshes the Stocks page.
+2. **Markers** (strip from caption/TTS after apply):
+   - Add: `<<<MUSE_STOCK{"op":"add","symbol":"AAPL"}>>>`
+   - Remove: `<<<MUSE_STOCK{"op":"remove","symbol":"SPCX"}>>>`
+   - Clear: `<<<MUSE_STOCK{"op":"clear"}>>>`
+   - Replace: `<<<MUSE_STOCK{"op":"replace","symbols":["META","AAPL"]}>>>`
+   - Alias: `"sym"` works like `"symbol"`; `delete`/`del` work like `remove`.
+3. **link.invoke** → **`device.stock`** with the same JSON fields.
+4. **User phrasing for Muse**: 「把 AAPL 加到自选」「删掉 SPCX」「自选只留 META 和 AAPL」— Muse must emit the marker (or invoke `device.stock`), not only edit GitHub `watchlist.json`.
+5. **Todos visibility (999.2.14+)**: completed items stay in NVS but are **not rendered**; overdue items **stay visible** (red 「已过期」) until marked complete.
+6. **Translate PTT (999.2.14+)**: holding BOOT on the translate tile must **not** jump to the Muse face; stays on translate for STT→translate→TTS.

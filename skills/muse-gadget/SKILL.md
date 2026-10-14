@@ -104,3 +104,16 @@ description: >-
 | 语音转写跑偏 / STT drift | 999.1.7+ 看 `8788` STT 与 Azure；失败会回退 Muse 听写；查 WG、`muse-tts-proxy`、麦增益 |
 | 有字无声 / TTS 平淡 | `8787`；Speaker；prosody env；HsiaoChen 无 style |
 | 手机 VLESS 超时 | 勿误重启 x-ui；查孤儿 xray |
+
+## 13. Chat-driven Stocks (999.2.14+)
+1. **Same pattern as todos**: Muse reply embeds `<<<MUSE_STOCK{...}>>>`; board parses, writes NVS namespace `stock` / key `watchlist`, refreshes the Stocks page.
+2. **Markers** (strip from caption/TTS after apply):
+   - Add: `<<<MUSE_STOCK{"op":"add","symbol":"AAPL"}>>>`
+   - Remove: `<<<MUSE_STOCK{"op":"remove","symbol":"SPCX"}>>>`
+   - Clear: `<<<MUSE_STOCK{"op":"clear"}>>>`
+   - Replace: `<<<MUSE_STOCK{"op":"replace","symbols":["META","AAPL"]}>>>`
+   - Alias: `"sym"` works like `"symbol"`; `delete`/`del` work like `remove`.
+3. **link.invoke** → **`device.stock`** with the same JSON fields.
+4. **User phrasing for Muse**: 「把 AAPL 加到自选」「删掉 SPCX」「自选只留 META 和 AAPL」— Muse must emit the marker (or invoke `device.stock`), not only edit GitHub `watchlist.json`.
+5. **Todos visibility (999.2.14+)**: completed items stay in NVS but are **not rendered**; overdue items **stay visible** (red 「已过期」) until marked complete.
+6. **Translate PTT (999.2.14+)**: holding BOOT on the translate tile must **not** jump to the Muse face; stays on translate for STT→translate→TTS.

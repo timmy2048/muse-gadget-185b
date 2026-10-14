@@ -1632,7 +1632,10 @@ static void frame_tick(lv_timer_t *timer)
     if (mode != s_last_mode) {
         if (mode == MUSE_MODE_LISTENING) {
             image_hide_locked();
-            muse_ui_show_face();
+            /* Translate page owns PTT: stay on that tile (STT→translate→TTS). */
+            if (!muse_ui_page_is_translate()) {
+                muse_ui_show_face();
+            }
         }
         s_last_mode = mode;
     }

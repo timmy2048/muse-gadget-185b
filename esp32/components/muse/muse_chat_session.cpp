@@ -73,6 +73,7 @@ extern "C" {
 #include "muse_settings.h"
 #include "muse_text.h"
 #include "muse_todo.h"
+#include "muse_stock.h"
 #include "muse_wifi.h"
 }
 #include "muse_chat_priv.h"
@@ -1400,6 +1401,11 @@ static void message_done(int i, const char *final_text)
                 m.len = strlen(full);
                 ESP_LOGI(TAG, "todo: applied %d chat command(s)", ncmd);
             }
+            int nstock = muse_stock_apply_chat_markers(full);
+            if (nstock > 0) {
+                m.len = strlen(full);
+                ESP_LOGI(TAG, "stock: applied %d chat command(s)", nstock);
+            }
         }
         if (m.len && m.tts == TTS_NONE && muse_settings_speaker_on()) {
             m.tts = TTS_QUEUED;
@@ -1415,6 +1421,11 @@ static void message_done(int i, const char *final_text)
         if (ncmd > 0) {
             m.len = strlen(full);
             ESP_LOGI(TAG, "todo: applied %d chat command(s)", ncmd);
+        }
+        int nstock = muse_stock_apply_chat_markers(full);
+        if (nstock > 0) {
+            m.len = strlen(full);
+            ESP_LOGI(TAG, "stock: applied %d chat command(s)", nstock);
         }
     }
     if (m.len && m.tts == TTS_NONE) {

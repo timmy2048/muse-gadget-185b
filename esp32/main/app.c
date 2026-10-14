@@ -78,6 +78,7 @@
 #if CONFIG_MUSE_ENABLED
 #include "muse_glue.h"
 #include "muse_todo.h"
+#include "muse_stock.h"
 // Muse joins Wi-Fi from its own settings, before or without pairing.
 #define WIFI_WITHOUT_PAIRING 1
 #else
@@ -1963,6 +1964,28 @@ static cJSON *on_ws_command(
         cJSON *result = cJSON_CreateObject();
         cJSON_AddBoolToObject(result, "ok", true);
         cJSON_AddNumberToObject(result, "count", muse_todo_count());
+        return result;
+    }
+    if (strcmp(command, "device.stock") == 0) {
+        if (!params) {
+            return command_error("invalid_params", "device.stock requires params");
+        }
+        char *raw = cJSON_PrintUnformatted(params);
+        if (!raw) {
+            return command_error("out_of_memory", "failed to print stock params");
+        }
+        muse_stock_cmd_t cmd;
+        int prc = muse_stock_parse_cmd(raw, &cmd);
+        free(raw);
+        if (prc != 0) {
+            return command_error("invalid_params", "device.stock params not a valid stock command");
+        }
+        if (muse_stock_apply_cmd(&cmd) != 0) {
+            return command_error("apply_failed", "stock command could not be applied");
+        }
+        cJSON *result = cJSON_CreateObject();
+        cJSON_AddBoolToObject(result, "ok", true);
+        cJSON_AddNumberToObject(result, "count", muse_stock_count());
         return result;
     }
 #endif

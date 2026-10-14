@@ -24,15 +24,36 @@
 
 #ifdef ESP_PLATFORM
 #include "esp_http_client.h"
+#include "esp_heap_caps.h"
+#include "freertos/idf_additions.h"
 #include "esp_crt_bundle.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "nvs.h"
 #include "nvs_flash.h"
+#include "sdkconfig.h"
 #endif
 
 static const char *TAG = "muse_stock";
+
+#if CONFIG_MUSE_CJK_FONT
+LV_FONT_DECLARE(muse_font_cjk_16)
+/* Montserrat Latin + Unifont CJK fallback (same pattern as muse_todo). */
+static const lv_font_t *stock_font(void)
+{
+    static lv_font_t font;
+    static bool ready;
+    if (!ready) {
+        font = lv_font_montserrat_16;
+        font.fallback = &muse_font_cjk_16;
+        ready = true;
+    }
+    return &font;
+}
+#else
+static const lv_font_t *stock_font(void) { return &lv_font_montserrat_16; }
+#endif
 
 /* Remote watchlist: JSON array of symbol strings, e.g. ["META","SPCX"]. */
 #define STOCK_WATCHLIST_URL \
@@ -41,8 +62,7 @@ static const char *TAG = "muse_stock";
 #define STOCK_WATCHLIST_MAX 8
 #define STOCK_POLL_S 60.0f /* quote + watchlist poll interval during trading hours */
 
-/* Built-in fallback when NVS and remote both fail. */
-static const char *const s_default_watchlist[] = { "META", "SPCX" };
+/* Built-in META/SPCX demo default removed: empty -> 「暂无自选」. */
 
 /* China convention: red = up, green = down. */
 #define COLOR_BG 0x0b0b12
@@ -82,6 +102,9 @@ static bool s_have_remote_hash;
 /* Test/sim hook: <0 = automatic trading-hours detection, 0 = forced off,
  * >0 = forced on. */
 static int s_trading_override = -1;
+/* Chat / device.stock mutated the list on another task; rebuild on LVGL tick. */
+static volatile bool s_ui_dirty;
+
 
 static void show_view(stock_view_t v);
 
@@ -474,7 +497,19 @@ static void fetch_request(bool remote)
         s_want_remote = true;
     }
     if (!s_fetch_task) {
-        xTaskCreate(stock_fetch_task, "stock_fetch", 6144, NULL, 3, &s_fetch_task);
+        {
+            BaseType_t ok = pdFAIL;
+#if CONFIG_SPIRAM
+            ok = xTaskCreateWithCaps(stock_fetch_task, "stock_fetch", 6144, NULL, 3,
+                                     &s_fetch_task, MALLOC_CAP_SPIRAM);
+#endif
+            if (ok != pdPASS) {
+                ok = xTaskCreate(stock_fetch_task, "stock_fetch", 6144, NULL, 3, &s_fetch_task);
+            }
+            if (ok != pdPASS) {
+                ESP_LOGE(TAG, "stock_fetch task create failed");
+            }
+        }
     } else {
         xTaskNotifyGive(s_fetch_task);
     }
@@ -575,13 +610,10 @@ static void load_watchlist(void)
         }
     }
     if (n <= 0) {
-        s_src_name = "default";
-        ESP_LOGI(TAG, "watchlist: NVS and remote failed, using built-in default");
+        /* Empty watchlist: show 「暂无自选」 — no OFFLINE/DEMO fake rows. */
+        s_src_name = "empty";
+        ESP_LOGI(TAG, "watchlist: empty (no NVS/remote symbols)");
         n = 0;
-        for (size_t i = 0; i < sizeof(s_default_watchlist) / sizeof(s_default_watchlist[0]); i++) {
-            snprintf(symbols[n++], STOCK_SYMBOL_LEN, "%.*s",
-                     STOCK_SYMBOL_LEN - 1, s_default_watchlist[i]);
-        }
     }
 
     s_count = n;
@@ -901,6 +933,14 @@ static void build_quotes(void)
     lv_obj_set_scrollbar_mode(list, LV_SCROLLBAR_MODE_OFF);
     s_quote_list = list;
 
+    if (s_count == 0) {
+        lv_obj_t *empty = label(list, stock_font(), COLOR_DIM, "暂无自选");
+        lv_obj_set_width(empty, lv_pct(100));
+        lv_obj_set_style_text_align(empty, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_set_style_pad_top(empty, 24, 0);
+        return;
+    }
+
     for (int i = 0; i < s_count; i++) {
         const stock_quote_t *q = &s_quotes[i];
         bool up = q->change_pct >= 0;
@@ -1103,6 +1143,89 @@ static void refresh_input_label(void)
 /* Public API                                                          */
 /* ------------------------------------------------------------------ */
 
+static int find_symbol_idx(const char *sym)
+{
+    if (!sym || !sym[0]) {
+        return -1;
+    }
+    for (int i = 0; i < s_count; i++) {
+        if (!strcmp(s_quotes[i].symbol, sym)) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+int muse_stock_apply_cmd(const muse_stock_cmd_t *cmd)
+{
+    if (!cmd) {
+        return -1;
+    }
+    int rc = -1;
+    switch (cmd->op) {
+    case MUSE_STOCK_OP_ADD:
+        if (add_symbol(cmd->symbol)) {
+            rc = 0;
+        } else if (find_symbol_idx(cmd->symbol) >= 0) {
+            rc = 0; /* already present: treat as success */
+        }
+        break;
+    case MUSE_STOCK_OP_REMOVE: {
+        int idx = find_symbol_idx(cmd->symbol);
+        if (idx >= 0) {
+            delete_symbol(idx);
+            rc = 0;
+        }
+        break;
+    }
+    case MUSE_STOCK_OP_CLEAR:
+        while (s_count > 0) {
+            delete_symbol(s_count - 1);
+        }
+        rc = 0;
+        ESP_LOGI(TAG, "watchlist cleared via chat/cmd");
+        break;
+    case MUSE_STOCK_OP_REPLACE: {
+        while (s_count > 0) {
+            delete_symbol(s_count - 1);
+        }
+        rc = 0;
+        for (int i = 0; i < cmd->nsymbols; i++) {
+            if (!add_symbol(cmd->symbols[i])) {
+                /* keep going; partial replace still ok if at least first succeeded */
+            }
+        }
+        ESP_LOGI(TAG, "watchlist replaced via chat/cmd -> %d", s_count);
+        break;
+    }
+    default:
+        break;
+    }
+    if (rc == 0) {
+        s_ui_dirty = true;
+    }
+    return rc;
+}
+
+static int stock_apply_cmd_cb(const muse_stock_cmd_t *cmd, void *user)
+{
+    (void)user;
+    return muse_stock_apply_cmd(cmd);
+}
+
+int muse_stock_apply_chat_markers(char *text)
+{
+    if (!text || !strstr(text, MUSE_STOCK_MARKER_OPEN)) {
+        return 0;
+    }
+    return muse_stock_scan_markers(text, stock_apply_cmd_cb, NULL);
+}
+
+int muse_stock_count(void)
+{
+    return s_count;
+}
+
 void muse_stock_build(lv_obj_t *tile, int w, int h)
 {
     s_w = w;
@@ -1167,6 +1290,15 @@ void muse_stock_tick(float now)
 {
     if (!s_root) {
         return;
+    }
+    if (s_ui_dirty) {
+        s_ui_dirty = false;
+        if (s_view == SV_QUOTES || s_view == SV_MANAGE) {
+            show_view(s_view);
+        }
+#ifdef ESP_PLATFORM
+        fetch_request(false);
+#endif
     }
 #ifdef ESP_PLATFORM
     /* Background fetcher results land here, on the UI thread. */

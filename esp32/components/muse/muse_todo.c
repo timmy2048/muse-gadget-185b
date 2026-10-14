@@ -693,7 +693,7 @@ static void format_due(const muse_todo_item_t *it, char *buf, size_t cap, uint32
     strftime(when, sizeof(when), "%m-%d %H:%M", &tm_due);
     double diff = difftime(due, now);
     if (diff < 0) {
-        snprintf(buf, cap, "%s - 到期", when);
+        snprintf(buf, cap, "%s · 已过期", when);
         *color = COLOR_DANGER;
     } else if (diff < 3600) {
         snprintf(buf, cap, "%s - 即将到期", when);
@@ -805,7 +805,7 @@ static void rebuild_list(void)
         set_text_cjk(s_sub, sub);
     }
 
-    if (s_count == 0) {
+    if (nopen == 0) {
         lv_obj_t *empty = label(s_list, todo_font(), COLOR_DIM, "暂无待办");
         lv_obj_set_width(empty, lv_pct(100));
         lv_obj_set_style_text_align(empty, LV_TEXT_ALIGN_CENTER, 0);
@@ -815,13 +815,21 @@ static void rebuild_list(void)
 
     for (int i = 0; i < s_count; i++) {
         const muse_todo_item_t *it = &s_items[i];
+        /* Completed items stay in NVS but are not rendered. Overdue stay visible. */
+        if (it->done) {
+            continue;
+        }
         lv_obj_t *row = lv_obj_create(s_list);
         lv_obj_remove_style_all(row);
         lv_obj_set_size(row, lv_pct(100), 52);
         lv_obj_set_style_radius(row, 14, 0);
         lv_obj_set_style_pad_hor(row, 12, 0);
         lv_obj_set_style_bg_color(row, lv_color_hex(COLOR_ROW), 0);
-        lv_obj_set_style_bg_opa(row, it->done ? LV_OPA_50 : LV_OPA_COVER, 0);
+        lv_obj_set_style_bg_opa(row, LV_OPA_COVER, 0);
+        if (it->due > 0 && (time_t)it->due < time(NULL)) {
+            lv_obj_set_style_border_width(row, 2, 0);
+            lv_obj_set_style_border_color(row, lv_color_hex(COLOR_DANGER), 0);
+        }
         lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
         lv_obj_add_event_cb(row, on_row_click, LV_EVENT_CLICKED, (void *)(intptr_t)i);
 
