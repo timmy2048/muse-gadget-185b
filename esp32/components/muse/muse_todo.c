@@ -84,33 +84,56 @@ static TaskHandle_t s_tts_task;
 static char s_tts_pending[MUSE_TODO_TITLE_LEN + 16];
 #endif
 
-#ifdef CONFIG_MUSE_CJK_FONT
+#if CONFIG_MUSE_CJK_FONT
 LV_FONT_DECLARE(muse_font_cjk_16)
+/* Same pattern as muse_settings_ui: Montserrat Latin + Unifont CJK fallback.
+ * Do NOT use unscii_8 as primary with a 16px CJK fallback — mixed cell sizes
+ * look like 乱码 on the round display. */
 static const lv_font_t *todo_font(void)
 {
     static lv_font_t font;
-    static bool init;
-    if (!init) {
-        font = lv_font_unscii_16;
+    static bool ready;
+    if (!ready) {
+        font = lv_font_montserrat_16;
         font.fallback = &muse_font_cjk_16;
-        init = true;
+        ready = true;
     }
     return &font;
 }
 static const lv_font_t *todo_font_sm(void)
 {
     static lv_font_t font;
-    static bool init;
-    if (!init) {
-        font = lv_font_unscii_8;
+    static bool ready;
+    if (!ready) {
+        font = lv_font_montserrat_14;
         font.fallback = &muse_font_cjk_16;
-        init = true;
+        ready = true;
     }
     return &font;
 }
+static void set_text_cjk(lv_obj_t *l, const char *text)
+{
+    if (!l || !text) {
+        return;
+    }
+    if (strcmp(lv_label_get_text(l), text) != 0) {
+        lv_label_set_text(l, text);
+    }
+}
 #else
 static const lv_font_t *todo_font(void) { return &lv_font_montserrat_16; }
-static const lv_font_t *todo_font_sm(void) { return &lv_font_unscii_8; }
+static const lv_font_t *todo_font_sm(void) { return &lv_font_montserrat_14; }
+static void set_text_cjk(lv_obj_t *l, const char *text)
+{
+    char shown[128];
+    if (!l || !text) {
+        return;
+    }
+    text = muse_text_showable(text, shown, sizeof(shown));
+    if (strcmp(lv_label_get_text(l), text) != 0) {
+        lv_label_set_text(l, text);
+    }
+}
 #endif
 
 /* ------------------------------------------------------------------ */
@@ -639,7 +662,7 @@ static lv_obj_t *label(lv_obj_t *parent, const lv_font_t *font, uint32_t color, 
     lv_obj_t *l = lv_label_create(parent);
     lv_obj_set_style_text_font(l, font, 0);
     lv_obj_set_style_text_color(l, lv_color_hex(color), 0);
-    lv_label_set_text(l, text);
+    set_text_cjk(l, text ? text : "");
     return l;
 }
 
@@ -662,10 +685,10 @@ static void format_due(const muse_todo_item_t *it, char *buf, size_t cap, uint32
     strftime(when, sizeof(when), "%m-%d %H:%M", &tm_due);
     double diff = difftime(due, now);
     if (diff < 0) {
-        snprintf(buf, cap, "%s · 到期", when);
+        snprintf(buf, cap, "%s - 到期", when);
         *color = COLOR_DANGER;
     } else if (diff < 3600) {
-        snprintf(buf, cap, "%s · 即将到期", when);
+        snprintf(buf, cap, "%s - 即将到期", when);
         *color = COLOR_WARN;
     } else {
         snprintf(buf, cap, "%s", when);
@@ -690,12 +713,6 @@ static void on_row_click(lv_event_t *e)
 }
 
 static void rebuild_list(void);
-
-static void on_hint_click(lv_event_t *e)
-{
-    (void)e;
-    /* Show empty-state hint card already is the add-via-muse message. */
-}
 
 static void hide_popup(void)
 {
@@ -744,11 +761,11 @@ static void show_reminder(int idx)
         return;
     }
     s_remind_idx = idx;
-    lv_label_set_text(s_popup_title, s_items[idx].title);
+    set_text_cjk(s_popup_title, s_items[idx].title);
     char body[64];
     uint32_t c;
     format_due(&s_items[idx], body, sizeof(body), &c);
-    lv_label_set_text(s_popup_body, body);
+    set_text_cjk(s_popup_body, body);
     lv_obj_remove_flag(s_popup, LV_OBJ_FLAG_HIDDEN);
     muse_state_poke();
     start_reminder_tts(s_items[idx].title);
@@ -774,39 +791,17 @@ static void rebuild_list(void)
         lv_obj_clean(s_list);
     }
     char sub[48];
-    snprintf(sub, sizeof(sub), "%d open · via Muse chat", open_count());
+    int nopen = open_count();
+    snprintf(sub, sizeof(sub), "%d 项待办", nopen);
     if (s_sub) {
-        lv_label_set_text(s_sub, sub);
+        set_text_cjk(s_sub, sub);
     }
 
     if (s_count == 0) {
-        lv_obj_t *card = lv_obj_create(s_list);
-        lv_obj_remove_style_all(card);
-        lv_obj_set_size(card, lv_pct(100), LV_SIZE_CONTENT);
-        lv_obj_set_style_bg_color(card, lv_color_hex(COLOR_ROW), 0);
-        lv_obj_set_style_bg_opa(card, LV_OPA_COVER, 0);
-        lv_obj_set_style_border_color(card, lv_color_hex(COLOR_ACCENT), 0);
-        lv_obj_set_style_border_width(card, 1, 0);
-        lv_obj_set_style_radius(card, 18, 0);
-        lv_obj_set_style_pad_all(card, 14, 0);
-        lv_obj_add_flag(card, LV_OBJ_FLAG_CLICKABLE);
-        lv_obj_add_event_cb(card, on_hint_click, LV_EVENT_CLICKED, NULL);
-
-        lv_obj_t *ht = label(card, todo_font(), COLOR_CAPTION, "跟 Muse 说一声");
-        lv_obj_set_width(ht, lv_pct(100));
-        lv_obj_set_style_text_align(ht, LV_TEXT_ALIGN_CENTER, 0);
-
-        lv_obj_t *hq = label(card, todo_font_sm(), COLOR_TEXT,
-                             "「提醒我明天 10 点开会」");
-        lv_obj_set_width(hq, lv_pct(100));
-        lv_obj_set_style_text_align(hq, LV_TEXT_ALIGN_CENTER, 0);
-        lv_obj_set_style_pad_top(hq, 8, 0);
-
-        lv_obj_t *hn = label(card, todo_font_sm(), COLOR_DIM,
-                             "Muse 同步到板子 · 到期蜂鸣+TTS");
-        lv_obj_set_width(hn, lv_pct(100));
-        lv_obj_set_style_text_align(hn, LV_TEXT_ALIGN_CENTER, 0);
-        lv_obj_set_style_pad_top(hn, 8, 0);
+        lv_obj_t *empty = label(s_list, todo_font(), COLOR_DIM, "暂无待办");
+        lv_obj_set_width(empty, lv_pct(100));
+        lv_obj_set_style_text_align(empty, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_set_style_pad_top(empty, 24, 0);
         return;
     }
 
@@ -949,26 +944,16 @@ void muse_todo_build(lv_obj_t *tile, int w, int h)
     lv_obj_set_style_text_letter_space(title, 3, 0);
     lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 40);
 
-    s_sub = label(s_root, todo_font_sm(), COLOR_DIM, "0 open · via Muse chat");
+    s_sub = label(s_root, todo_font_sm(), COLOR_DIM, "0 项待办");
     lv_obj_align(s_sub, LV_ALIGN_TOP_MID, 0, 66);
 
     s_list = lv_obj_create(s_root);
     lv_obj_remove_style_all(s_list);
-    lv_obj_set_size(s_list, w - 96, h - 170);
+    lv_obj_set_size(s_list, w - 96, h - 140);
     lv_obj_align(s_list, LV_ALIGN_TOP_MID, 0, 88);
     lv_obj_set_flex_flow(s_list, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_style_pad_row(s_list, 8, 0);
     lv_obj_set_scrollbar_mode(s_list, LV_SCROLLBAR_MODE_OFF);
-
-    lv_obj_t *pill = lv_obj_create(s_root);
-    lv_obj_remove_style_all(pill);
-    lv_obj_set_style_bg_color(pill, lv_color_hex(COLOR_ACCENT), 0);
-    lv_obj_set_style_bg_opa(pill, LV_OPA_COVER, 0);
-    lv_obj_set_style_radius(pill, 20, 0);
-    lv_obj_set_style_pad_hor(pill, 18, 0);
-    lv_obj_set_style_pad_ver(pill, 8, 0);
-    lv_obj_align(pill, LV_ALIGN_BOTTOM_MID, 0, -40);
-    label(pill, todo_font_sm(), 0xffffff, "跟 Muse 说「加待办」");
 
     build_popup(s_root);
     rebuild_list();
