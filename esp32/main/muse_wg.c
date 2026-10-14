@@ -13,10 +13,12 @@
 #include <sys/time.h>
 
 #include "esp_log.h"
+#include "esp_heap_caps.h"
 #include "esp_netif.h"
 #include "esp_netif_sntp.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/idf_additions.h"
 #include "freertos/semphr.h"
 
 #include "esp_wireguard.h"
@@ -236,10 +238,23 @@ void muse_wg_notify_wifi_up(void)
     if (!s_lock) s_lock = xSemaphoreCreateMutex();
     if (s_task_running) return;
     s_task_running = true;
-    if (xTaskCreate(wg_task, "muse_wg", 8192, NULL, 5, &s_task)
-        != pdPASS) {
+    /* Stack in PSRAM: after Wi-Fi/BLE boot the largest internal free block
+     * is often ~7 KiB (hb int=14K/7K), too small for an 8 KiB internal stack
+     * — that produced "failed to start muse_wg task" and left Muse/OTA
+     * unreachable (China needs WireGuard). Do not block here: this runs from
+     * the Wi-Fi IP event. CONFIG_SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY=y on 185B. */
+    BaseType_t ok = xTaskCreateWithCaps(wg_task, "muse_wg", 8192, NULL, 5,
+                                        &s_task, MALLOC_CAP_SPIRAM);
+    if (ok != pdPASS) {
+        /* Last resort: smaller internal stack if a contiguous block exists. */
+        ok = xTaskCreate(wg_task, "muse_wg", 6144, NULL, 5, &s_task);
+    }
+    if (ok != pdPASS) {
         s_task_running = false;
-        ESP_LOGE(TAG, "failed to start muse_wg task");
+        ESP_LOGE(TAG, "failed to start muse_wg task (int free=%u largest=%u psram=%u)",
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
     } else {
         ESP_LOGI(TAG, "Wi-Fi up; starting WireGuard");
     }
