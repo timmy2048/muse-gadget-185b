@@ -42,3 +42,4 @@ build-*/
 *.bin
 *.log
 **/sdkconfig.ota.local
+**/sdkconfig.token.local
