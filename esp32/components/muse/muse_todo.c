@@ -452,14 +452,22 @@ static int http_get(const char *url, char *buf, size_t cap, size_t *out_len)
 static void todo_fetch_task(void *arg)
 {
     (void)arg;
+    /* Heap buffer — a stack TODO_JSON_CAP on a 6K task blew the stack under
+     * HTTPS/mbedtls and rebooted back to the face tile (999.2.8 symptoms). */
+    char *buf = malloc(TODO_JSON_CAP);
+    if (!buf) {
+        ESP_LOGE(TAG, "todo fetch: no memory");
+        s_fetch_task = NULL;
+        vTaskDelete(NULL);
+        return;
+    }
     for (;;) {
         ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS((uint32_t)(TODO_POLL_S * 1000)));
         if (strcmp(s_src, "nvs") == 0) {
             continue; /* local edits win, same as stock */
         }
-        char buf[TODO_JSON_CAP];
         size_t len = 0;
-        int st = http_get(TODO_REMOTE_URL, buf, sizeof(buf), &len);
+        int st = http_get(TODO_REMOTE_URL, buf, TODO_JSON_CAP, &len);
         if (st != 200 || len < 2) {
             ESP_LOGW(TAG, "remote todos fetch failed (%d)", st);
             continue;
@@ -499,7 +507,7 @@ static void adopt_remote_if_needed(void)
 static void fetch_kick(void)
 {
     if (!s_fetch_task) {
-        xTaskCreate(todo_fetch_task, "todo_fetch", 6144, NULL, 3, &s_fetch_task);
+        xTaskCreate(todo_fetch_task, "todo_fetch", 8192, NULL, 3, &s_fetch_task);
     }
     if (s_fetch_task) {
         xTaskNotifyGive(s_fetch_task);
@@ -954,6 +962,8 @@ void muse_todo_build(lv_obj_t *tile, int w, int h)
     lv_obj_set_flex_flow(s_list, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_style_pad_row(s_list, 8, 0);
     lv_obj_set_scrollbar_mode(s_list, LV_SCROLLBAR_MODE_OFF);
+    /* Vertical only so horizontal tileview swipe can leave TODO. */
+    lv_obj_set_scroll_dir(s_list, LV_DIR_VER);
 
     build_popup(s_root);
     rebuild_list();

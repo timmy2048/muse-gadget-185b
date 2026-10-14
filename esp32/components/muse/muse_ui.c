@@ -869,7 +869,8 @@ static void build_screen(void)
         lv_obj_set_scrollbar_mode(s_stocks, LV_SCROLLBAR_MODE_OFF);
         muse_stock_build(s_stocks, s_w, s_h);
         /* Todos: swipe left from stocks. */
-        s_todos = lv_tileview_add_tile(s_tv, 3, 0, LV_DIR_RIGHT);
+        /* Last tile: only LEFT back to stocks (face uses RIGHT to leave col 0). */
+        s_todos = lv_tileview_add_tile(s_tv, 3, 0, LV_DIR_LEFT);
         lv_obj_set_scrollbar_mode(s_todos, LV_SCROLLBAR_MODE_OFF);
         muse_todo_build(s_todos, s_w, s_h);
         face = s_face;
