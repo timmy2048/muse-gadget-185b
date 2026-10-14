@@ -797,6 +797,8 @@ void muse_hatch_config_changed(void)
 {
 }
 
+__attribute__((weak)) void muse_hatch_suspend_for_ota(void) {}
+
 void muse_hatch_set_resting(bool resting)
 {
     (void)resting;   /* Link's session does the polling */

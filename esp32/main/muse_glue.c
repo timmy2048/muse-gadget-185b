@@ -37,6 +37,9 @@
 #include "wifi_mgr.h"
 
 #include "muse_ble.h"
+#include "muse_chat.h"
+#include "muse_stock.h"
+#include "esp_heap_caps.h"
 #include "muse_board.h"
 #include "muse_link.h"
 #include "muse_mem.h"
@@ -715,6 +718,24 @@ static void muse_ota_bridge_cb(const ota_event_t *ev, void *user)
 
 void muse_ota_apply(const char *url, bool force, muse_ota_apply_cb_t cb, void *user)
 {
+    /* Display+audio+BLE+Muse-TLS leave too little internal RAM for another
+     * HTTPS session (see app.c PAIR_THEN_RESTART comment). Reclaim before OTA. */
+    ESP_LOGI("muse_glue", "OTA prep: int=%uK dma=%uK psram=%uK",
+             (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024),
+             (unsigned)(heap_caps_get_free_size(MALLOC_CAP_DMA) / 1024),
+             (unsigned)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024));
+#if CONFIG_MUSE_ENABLED
+    muse_hatch_suspend_for_ota();
+    muse_stock_set_trading_override(0);   /* pause quote HTTP */
+    /* BLE shares radio/heap with Wi-Fi TLS; OTA reboots so full shutdown is OK. */
+    if (ble_server_is_started()) {
+        ble_server_full_shutdown();
+    }
+    vTaskDelay(pdMS_TO_TICKS(800));
+    ESP_LOGI("muse_glue", "OTA prep done: int=%uK dma=%uK",
+             (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024),
+             (unsigned)(heap_caps_get_free_size(MALLOC_CAP_DMA) / 1024));
+#endif
     muse_ota_bridge_t *b = NULL;
     if (cb) {
         b = calloc(1, sizeof(*b));

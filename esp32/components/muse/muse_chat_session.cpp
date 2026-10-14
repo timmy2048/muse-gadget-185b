@@ -133,7 +133,7 @@ static const char *TAG = "muse_chat_session";
 
 /* ---- Voice task <-> session task ---- */
 
-enum cmd_type_t : uint8_t { CMD_CONNECT, CMD_FORGET, CMD_BEGIN, CMD_END, CMD_CANCEL, CMD_TEXT, CMD_TEXT_CANCEL, CMD_WAKE };
+enum cmd_type_t : uint8_t { CMD_CONNECT, CMD_FORGET, CMD_BEGIN, CMD_END, CMD_CANCEL, CMD_TEXT, CMD_TEXT_CANCEL, CMD_WAKE, CMD_SUSPEND_OTA };
 
 struct cmd_t {
     cmd_type_t type;
@@ -2156,6 +2156,14 @@ static void handle(const cmd_t &cmd)
             turn_fail("CANCELLED");
         }
         break;
+    case CMD_SUSPEND_OTA:
+        /* Free the Muse TLS socket before OTA; do not auto-reconnect (board reboots). */
+        if (s_turn.phase != P_IDLE) {
+            turn_fail("OTA STARTING");
+        }
+        disconnect("ota suspend");
+        s_auto_next_us = INT64_MAX / 4;
+        break;
     case CMD_WAKE:   /* only ends hatch_task's resting wait */
         break;
     }
@@ -2313,6 +2321,11 @@ extern "C" void muse_hatch_chat_connect(void)
 extern "C" void muse_hatch_chat_forget(void)
 {
     post(CMD_FORGET, 0);
+}
+
+extern "C" void muse_hatch_suspend_for_ota(void)
+{
+    post(CMD_SUSPEND_OTA, 0);
 }
 
 extern "C" bool muse_hatch_ready(void)

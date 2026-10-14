@@ -38,6 +38,7 @@ bool ota_is_enabled(void) {
 #include "esp_log.h"
 #include "esp_system.h"
 #include "esp_https_ota.h"
+#include "esp_heap_caps.h"
 #include "esp_http_client.h"
 #include "esp_crt_bundle.h"
 #include "freertos/FreeRTOS.h"
@@ -197,13 +198,20 @@ static void ota_task(void *arg) {
     const char *ota_url = ctx->url;
     log_request_headers("ota download", "GET", ota_url, user_agent);
 
+    /* GitHub release CDN Location headers are ~900+ bytes; keep RX buffer roomy.
+     * keep_alive off: one less TLS buffer while internal heap is tight. */
+    ESP_LOGI(TAG, "pre-begin heap int=%u dma=%u psram=%u",
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_DMA),
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
     esp_http_client_config_t http_cfg = {
         .url = ota_url,
         .crt_bundle_attach = esp_crt_bundle_attach,
         .user_agent = user_agent,
         .timeout_ms = OTA_HTTP_TIMEOUT_MS,
-        .keep_alive_enable = true,
+        .keep_alive_enable = false,
         .max_redirection_count = OTA_MAX_REDIRECTS,
+        .buffer_size = 2048,
         .buffer_size_tx = OTA_HTTP_TX_BUFFER_BYTES,
         .event_handler = ota_http_event_handler,
         .user_data = (void *)"ota download",
@@ -216,7 +224,9 @@ static void ota_task(void *arg) {
     esp_err_t err = esp_https_ota_begin(&ota_cfg, &handle);
     if (err != ESP_OK || !handle) {
         char msg[96];
-        snprintf(msg, sizeof(msg), "begin failed: %s", esp_err_to_name(err));
+        snprintf(msg, sizeof(msg), "begin failed: %s (int=%uK)",
+                 esp_err_to_name(err),
+                 (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024));
         ESP_LOGE(TAG, "%s", msg);
         emit(ctx, OTA_RESULT_FAILED, msg, NULL, running);
         goto done;

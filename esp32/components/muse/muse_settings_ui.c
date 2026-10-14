@@ -1327,8 +1327,14 @@ static void apply_ota_done_ui(void)
         }
     } else {
         char buf[128];
-        snprintf(buf, sizeof(buf), "升级失败：%.80s",
-                 s_upd_done_detail[0] ? s_upd_done_detail : "?");
+        const char *d = s_upd_done_detail[0] ? s_upd_done_detail : "?";
+        /* Map low-heap / task-start failures to a clear Chinese tip. */
+        if (strstr(d, "could not start") || strstr(d, "out of memory") ||
+            strstr(d, "NO_MEM") || strstr(d, "begin failed")) {
+            snprintf(buf, sizeof(buf), "无法开始升级（内存不足），请USB刷机或重启后再试");
+        } else {
+            snprintf(buf, sizeof(buf), "升级失败：%.80s", d);
+        }
         if (s_upd_status) {
             set_text_cjk(s_upd_status, buf);
         }

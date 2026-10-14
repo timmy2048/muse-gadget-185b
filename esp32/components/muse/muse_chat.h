@@ -73,6 +73,9 @@ const char *muse_hatch_state_name(muse_hatch_state_t state);
 /* Screen off, voice idle: check the connection less often. */
 void muse_hatch_set_resting(bool resting);
 
+/* Drop Muse TLS before OTA (no auto-reconnect until reboot). */
+void muse_hatch_suspend_for_ota(void);
+
 /* ---- Push-to-talk turns (voice task only) ---- */
 
 /* Token set and Wi-Fi up: a press can start a turn. */
