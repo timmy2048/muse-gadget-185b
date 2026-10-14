@@ -20,9 +20,14 @@
 #include "esp_log.h"
 #include "muse_ui.h"
 #include "muse_keypad.h"
+#include "muse_stock_parse.h"
 
 #ifdef ESP_PLATFORM
 #include "esp_http_client.h"
+#include "esp_crt_bundle.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
+#include "freertos/task.h"
 #include "nvs.h"
 #include "nvs_flash.h"
 #endif
@@ -56,6 +61,7 @@ typedef struct {
     double change_pct; /* Yahoo Finance */
     double open;       /* Yahoo Finance */
     double prev_close; /* Yahoo Finance */
+    bool live;         /* true = real Yahoo quote, false = DEMO fallback */
 } stock_quote_t;
 
 typedef enum {
@@ -157,11 +163,12 @@ static int nvs_save(const char *json)
 
 #ifdef ESP_PLATFORM
 /* On device: HTTPS GET of the watchlist URL. */
-static int fetch_remote(char *buf, size_t cap)
+__attribute__((unused)) static int fetch_remote(char *buf, size_t cap)
 {
     esp_http_client_config_t cfg = {
         .url = STOCK_WATCHLIST_URL,
         .timeout_ms = 8000,
+        .crt_bundle_attach = esp_crt_bundle_attach,
     };
     esp_http_client_handle_t client = esp_http_client_init(&cfg);
     if (!client) {
@@ -191,7 +198,7 @@ static int fetch_remote(char *buf, size_t cap)
  * working directory. The fetch -> parse -> fallback path below is identical
  * to the device's; only the transport differs.
  */
-static int fetch_remote(char *buf, size_t cap)
+__attribute__((unused)) static int fetch_remote(char *buf, size_t cap)
 {
     FILE *f = fopen("watchlist.json", "r");
     if (!f) {
@@ -293,85 +300,215 @@ static void demo_quote(const char *symbol, stock_quote_t *q)
     }
 }
 
+#define YAHOO_URL_FMT \
+    "https://query1.finance.yahoo.com/v8/finance/chart/%s?interval=1d&range=1d"
+#define YAHOO_UA \
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " \
+    "(KHTML, like Gecko) Chrome/129.0 Safari/537.36"
+
 #ifdef ESP_PLATFORM
 /* ------------------------------------------------------------------ */
-/* Yahoo Finance real quotes (device only).                            */
-/* GET https://query1.finance.yahoo.com/v8/finance/chart/<SYM>          */
-/* Parse "regularMarketPrice" and "chartPreviousClose" from the JSON.   */
+/* Background fetcher (device only). Network I/O never runs on the UI  */
+/* task: the fetch task fills s_cache under s_mtx and raises s_dirty;  */
+/* muse_stock_tick() copies the cache into s_quotes on the UI thread.  */
 /* ------------------------------------------------------------------ */
 
-#define YAHOO_URL_FMT \
-    "https://query1.finance.yahoo.com/v8/finance/chart/%s?interval=1d&range=5d"
+typedef struct {
+    char symbol[STOCK_SYMBOL_LEN];
+    double price, open, prev_close;
+    bool ok;
+} stock_cache_t;
 
-static double json_num_after(const char *json, const char *key)
+static SemaphoreHandle_t s_mtx;
+static TaskHandle_t s_fetch_task;
+static char s_want[STOCK_WATCHLIST_MAX][STOCK_SYMBOL_LEN]; /* guarded by s_mtx */
+static int s_want_n;
+static stock_cache_t s_cache[STOCK_WATCHLIST_MAX]; /* guarded by s_mtx */
+static int s_cache_n;
+static char s_remote_cache[1024]; /* last remote watchlist body, guarded */
+static bool s_remote_cache_ok;
+static volatile bool s_dirty;
+static volatile bool s_remote_dirty;
+static volatile bool s_want_remote;
+
+/* HTTP GET into buf (heap, caller owned). Returns HTTP status or -1. */
+static int http_get(const char *url, char *buf, size_t cap, size_t *out_len)
 {
-    const char *p = strstr(json, key);
-    if (!p) {
-        return 0.0 / 0.0; /* NaN */
-    }
-    p += strlen(key);
-    while (*p == ' ' || *p == ':') {
-        p++;
-    }
-    return strtod(p, NULL);
-}
-
-static int yahoo_quote(const char *symbol, stock_quote_t *q)
-{
-    char url[128];
-    snprintf(url, sizeof(url), YAHOO_URL_FMT, symbol);
-
     esp_http_client_config_t cfg = {
         .url = url,
         .timeout_ms = 10000,
+        .crt_bundle_attach = esp_crt_bundle_attach,
+        .user_agent = YAHOO_UA,
     };
     esp_http_client_handle_t client = esp_http_client_init(&cfg);
     if (!client) {
         return -1;
     }
-    /* Yahoo chart JSON for one symbol is ~2-4 KB; 8 KB is plenty. */
-    static char buf[8192];
+    int status = -1;
     size_t len = 0;
-    int rc = -1;
     if (esp_http_client_open(client, 0) == ESP_OK &&
         esp_http_client_fetch_headers(client) >= 0) {
+        status = esp_http_client_get_status_code(client);
         int n;
-        while (len + 1 < sizeof(buf) &&
-               (n = esp_http_client_read(client, buf + len,
-                                         sizeof(buf) - 1 - len)) > 0) {
+        while (len + 1 < cap &&
+               (n = esp_http_client_read(client, buf + len, cap - 1 - len)) > 0) {
             len += (size_t)n;
         }
-        if (len > 0) {
-            buf[len] = '\0';
-            double price = json_num_after(buf, "\"regularMarketPrice\"");
-            double prev = json_num_after(buf, "\"chartPreviousClose\"");
-            if (price == price && prev == prev && prev > 0) { /* not NaN */
-                snprintf(q->symbol, sizeof(q->symbol), "%.*s",
-                         (int)(sizeof(q->symbol) - 1), symbol);
-                q->price = price;
-                q->prev_close = prev;
-                q->change_pct = (price - prev) / prev * 100.0;
-                q->open = prev; /* approx; chart API meta has no open here */
-                rc = 0;
-            }
-        }
     }
+    buf[len] = '\0';
+    *out_len = len;
     esp_http_client_close(client);
     esp_http_client_cleanup(client);
-    return rc;
+    return status;
+}
+
+static bool trading_hours_now(void);
+
+static void stock_fetch_task(void *arg)
+{
+    (void)arg;
+    const size_t cap = 16384;
+    char *buf = malloc(cap);
+    if (!buf) {
+        ESP_LOGE(TAG, "fetch task: no memory");
+        s_fetch_task = NULL;
+        vTaskDelete(NULL);
+        return;
+    }
+    TickType_t wait = 0;
+    for (;;) {
+        /* Woken early by a request (open/add/watchlist change). */
+        ulTaskNotifyTake(pdTRUE, wait);
+        wait = pdMS_TO_TICKS((uint32_t)(STOCK_POLL_S * 1000));
+        if (trading_hours_now()) {
+            s_want_remote = true; /* UI ignores it when the list is NVS-managed */
+        }
+
+        if (s_want_remote) {
+            s_want_remote = false;
+            size_t len = 0;
+            int st = http_get(STOCK_WATCHLIST_URL, buf, 1024, &len);
+            if (st == 200 && len > 0) {
+                xSemaphoreTake(s_mtx, portMAX_DELAY);
+                memcpy(s_remote_cache, buf, len + 1);
+                s_remote_cache_ok = true;
+                xSemaphoreGive(s_mtx);
+                s_remote_dirty = true;
+            } else {
+                ESP_LOGW(TAG, "remote watchlist fetch failed (%d)", st);
+            }
+        }
+
+        char want[STOCK_WATCHLIST_MAX][STOCK_SYMBOL_LEN];
+        xSemaphoreTake(s_mtx, portMAX_DELAY);
+        int n = s_want_n;
+        memcpy(want, s_want, sizeof(want));
+        xSemaphoreGive(s_mtx);
+
+        stock_cache_t res[STOCK_WATCHLIST_MAX];
+        int got = 0;
+        bool limited = false;
+        for (int i = 0; i < n; i++) {
+            memset(&res[i], 0, sizeof(res[i]));
+            snprintf(res[i].symbol, sizeof(res[i].symbol), "%.*s", STOCK_SYMBOL_LEN - 1, want[i]);
+            if (limited) {
+                continue;
+            }
+            char url[160];
+            snprintf(url, sizeof(url), YAHOO_URL_FMT, want[i]);
+            size_t len = 0;
+            int st = http_get(url, buf, cap, &len);
+            if (st == 429) {
+                ESP_LOGW(TAG, "yahoo 429 rate limited; backing off");
+                limited = true;
+                continue;
+            }
+            if (st == 200 && stock_parse_chart(buf, &res[i].price, &res[i].prev_close,
+                                               &res[i].open) == 0) {
+                res[i].ok = true;
+                got++;
+            } else {
+                ESP_LOGW(TAG, "yahoo %s failed (http %d, %u bytes)", want[i], st, (unsigned)len);
+            }
+        }
+        xSemaphoreTake(s_mtx, portMAX_DELAY);
+        /* Merge: keep a previously good quote if this round failed. */
+        for (int i = 0; i < n; i++) {
+            if (res[i].ok) {
+                continue;
+            }
+            for (int j = 0; j < s_cache_n; j++) {
+                if (s_cache[j].ok && !strcmp(s_cache[j].symbol, res[i].symbol)) {
+                    res[i] = s_cache[j];
+                    break;
+                }
+            }
+        }
+        memcpy(s_cache, res, sizeof(res));
+        s_cache_n = n;
+        xSemaphoreGive(s_mtx);
+        s_dirty = true;
+        ESP_LOGI(TAG, "quote fetch: %d/%d live", got, n);
+
+        if (limited) {
+            wait = pdMS_TO_TICKS(5 * 60 * 1000);
+        } else if (!trading_hours_now()) {
+            wait = portMAX_DELAY; /* outside trading hours: only on request */
+        }
+    }
+}
+
+/* UI thread: publish the current symbol list and wake the fetcher. */
+static void fetch_request(bool remote)
+{
+    if (!s_mtx) {
+        s_mtx = xSemaphoreCreateMutex();
+    }
+    xSemaphoreTake(s_mtx, portMAX_DELAY);
+    s_want_n = s_count;
+    for (int i = 0; i < s_count; i++) {
+        snprintf(s_want[i], STOCK_SYMBOL_LEN, "%.*s", STOCK_SYMBOL_LEN - 1, s_quotes[i].symbol);
+    }
+    xSemaphoreGive(s_mtx);
+    if (remote) {
+        s_want_remote = true;
+    }
+    if (!s_fetch_task) {
+        xTaskCreate(stock_fetch_task, "stock_fetch", 6144, NULL, 3, &s_fetch_task);
+    } else {
+        xTaskNotifyGive(s_fetch_task);
+    }
 }
 #endif
 
-/* Fill a quote: device tries Yahoo Finance first, falls back to demo
- * values so the UI never shows blanks on network failure. */
+/* Fill a quote on the UI thread: cached Yahoo quote if we have one,
+ * otherwise a DEMO value flagged live=false (rendered with a DEMO hint). */
 static void quote_for_symbol(const char *symbol, stock_quote_t *q)
 {
 #ifdef ESP_PLATFORM
-    if (yahoo_quote(symbol, q) == 0) {
-        return;
+    if (s_mtx) {
+        bool hit = false;
+        xSemaphoreTake(s_mtx, portMAX_DELAY);
+        for (int i = 0; i < s_cache_n; i++) {
+            if (s_cache[i].ok && !strcmp(s_cache[i].symbol, symbol)) {
+                snprintf(q->symbol, sizeof(q->symbol), "%.*s", STOCK_SYMBOL_LEN - 1, symbol);
+                q->price = s_cache[i].price;
+                q->open = s_cache[i].open;
+                q->prev_close = s_cache[i].prev_close;
+                q->change_pct = (q->price - q->prev_close) / q->prev_close * 100.0;
+                q->live = true;
+                hit = true;
+                break;
+            }
+        }
+        xSemaphoreGive(s_mtx);
+        if (hit) {
+            return;
+        }
     }
 #endif
     demo_quote(symbol, q);
+    q->live = false;
 }
 
 static uint32_t fnv1a(const char *s, size_t len)
@@ -415,7 +552,20 @@ static void load_watchlist(void)
             ESP_LOGI(TAG, "watchlist: %d symbols from NVS", n);
         }
     }
+#ifdef ESP_PLATFORM
+    bool remote_ok = false;
+    if (n <= 0 && s_mtx) {
+        xSemaphoreTake(s_mtx, portMAX_DELAY);
+        if (s_remote_cache_ok) {
+            snprintf(body, sizeof(body), "%s", s_remote_cache);
+            remote_ok = true;
+        }
+        xSemaphoreGive(s_mtx);
+    }
+    if (n <= 0 && remote_ok) {
+#else
     if (n <= 0 && fetch_remote(body, sizeof(body)) == 0) {
+#endif
         n = parse_watchlist_json(body, symbols, STOCK_WATCHLIST_MAX);
         if (n > 0) {
             s_src_name = "remote";
@@ -466,9 +616,24 @@ static void persist_watchlist(void)
 static bool remote_watchlist_check(void)
 {
     char body[1024];
+#ifdef ESP_PLATFORM
+    if (!s_mtx) {
+        return false;
+    }
+    xSemaphoreTake(s_mtx, portMAX_DELAY);
+    bool ok = s_remote_cache_ok;
+    if (ok) {
+        snprintf(body, sizeof(body), "%s", s_remote_cache);
+    }
+    xSemaphoreGive(s_mtx);
+    if (!ok) {
+        return false;
+    }
+#else
     if (fetch_remote(body, sizeof(body)) != 0) {
         return false;
     }
+#endif
     uint32_t h = fnv1a(body, strlen(body));
     if (s_have_remote_hash && h == s_remote_hash) {
         return false; /* unchanged */
@@ -497,6 +662,9 @@ static bool remote_watchlist_check(void)
         s_selected = -1;
     }
     s_src_name = "remote";
+#ifdef ESP_PLATFORM
+    fetch_request(false);
+#endif
     if (s_root && (s_view == SV_QUOTES || s_view == SV_MANAGE)) {
         show_view(s_view);
     }
@@ -507,6 +675,21 @@ static bool remote_watchlist_check(void)
  * replaces the body of this function. */
 static void quote_poll(void)
 {
+#ifdef ESP_PLATFORM
+    /* Device: apply the latest background-fetched quotes (no network here). */
+    int live = 0;
+    for (int i = 0; i < s_count; i++) {
+        char sym[STOCK_SYMBOL_LEN];
+        snprintf(sym, sizeof(sym), "%.*s", STOCK_SYMBOL_LEN - 1, s_quotes[i].symbol);
+        quote_for_symbol(sym, &s_quotes[i]);
+        live += s_quotes[i].live;
+    }
+    ESP_LOGI(TAG, "quotes applied: %d/%d live", live, s_count);
+    if (s_root && s_view == SV_QUOTES) {
+        show_view(SV_QUOTES);
+    }
+    return;
+#endif
     for (int i = 0; i < s_count; i++) {
         stock_quote_t *q = &s_quotes[i];
         double drift = ((rand() % 41) - 20) / 10000.0; /* +/-0.2% */
@@ -594,6 +777,9 @@ static bool add_symbol(const char *raw)
     quote_for_symbol(sym, &s_quotes[s_count++]);
     s_src_name = "nvs";
     persist_watchlist();
+#ifdef ESP_PLATFORM
+    fetch_request(false);
+#endif
     return true;
 }
 
@@ -687,6 +873,22 @@ static void build_quotes(void)
     lv_obj_set_flex_align(sub, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_style_pad_column(sub, 8, 0);
     lv_obj_align(sub, LV_ALIGN_TOP_MID, 0, 54);
+    bool any_demo = false;
+    for (int i = 0; i < s_count; i++) {
+        any_demo |= !s_quotes[i].live;
+    }
+    if (any_demo) {
+        lv_obj_t *badge = lv_obj_create(sub);
+        lv_obj_remove_style_all(badge);
+        lv_obj_set_size(badge, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+        lv_obj_set_style_bg_color(badge, lv_color_hex(COLOR_DEMO), 0);
+        lv_obj_set_style_bg_opa(badge, LV_OPA_30, 0);
+        lv_obj_set_style_radius(badge, 8, 0);
+        lv_obj_set_style_pad_hor(badge, 8, 0);
+        lv_obj_set_style_pad_ver(badge, 3, 0);
+        lv_obj_t *bt = label(badge, &lv_font_unscii_8, COLOR_DEMO, "OFFLINE/DEMO");
+        lv_obj_center(bt);
+    }
     snprintf(buf, sizeof(buf), "watchlist: %s", s_src_name);
     label(sub, &lv_font_unscii_8, COLOR_DIM, buf);
 
@@ -724,8 +926,8 @@ static void build_quotes(void)
         lv_obj_set_flex_align(right, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_END);
         lv_obj_set_style_pad_row(right, 3, 0);
         lv_obj_align(right, LV_ALIGN_RIGHT_MID, 0, 0);
-        snprintf(buf, sizeof(buf), "%.2f", q->price);
-        label(right, &lv_font_montserrat_20, COLOR_TEXT, buf);
+        snprintf(buf, sizeof(buf), q->live ? "%.2f" : "%.2f*", q->price);
+        label(right, &lv_font_montserrat_20, q->live ? COLOR_TEXT : COLOR_DEMO, buf);
         lv_obj_t *pill = lv_obj_create(right);
         lv_obj_remove_style_all(pill);
         lv_obj_set_size(pill, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
@@ -916,6 +1118,9 @@ void muse_stock_build(lv_obj_t *tile, int w, int h)
     lv_obj_remove_flag(s_root, LV_OBJ_FLAG_SCROLLABLE);
 
     show_view(SV_QUOTES);
+#ifdef ESP_PLATFORM
+    fetch_request(true);
+#endif
     s_next_poll = 0; /* tick() schedules the first poll */
     s_was_trading = trading_hours_now();
 }
@@ -926,6 +1131,9 @@ void muse_stock_show(void)
     /* Refresh the list each time the tile is opened (picks up NVS edits). */
     load_watchlist();
     show_view(SV_QUOTES);
+#ifdef ESP_PLATFORM
+    fetch_request(strcmp(s_src_name, "nvs") != 0);
+#endif
 }
 
 void muse_stock_select(int idx)
@@ -960,9 +1168,35 @@ void muse_stock_tick(float now)
     if (!s_root) {
         return;
     }
+#ifdef ESP_PLATFORM
+    /* Background fetcher results land here, on the UI thread. */
+    if (s_remote_dirty) {
+        s_remote_dirty = false;
+        if (strcmp(s_src_name, "nvs") != 0) {
+            if (s_src_name[0] == 'd') {
+                load_watchlist(); /* first remote body after a default start */
+                fetch_request(false);
+                if (s_view == SV_QUOTES || s_view == SV_MANAGE) {
+                    show_view(s_view);
+                }
+            } else {
+                remote_watchlist_check();
+            }
+        }
+    }
+    if (s_dirty) {
+        s_dirty = false;
+        quote_poll();
+    }
+#endif
     bool trading = trading_hours_now();
     if (trading != s_was_trading) {
         s_was_trading = trading;
+#ifdef ESP_PLATFORM
+        if (trading) {
+            fetch_request(true); /* wake the fetcher, it idles off-hours */
+        }
+#endif
         if (trading) {
             ESP_LOGI(TAG, "trading hours: polling every %.0fs", (double)STOCK_POLL_S);
         } else {
@@ -976,6 +1210,10 @@ void muse_stock_tick(float now)
         s_next_poll = now + STOCK_POLL_S;
         return;
     }
+#ifdef ESP_PLATFORM
+    (void)now;
+    return; /* device: the fetch task owns the 60s schedule */
+#endif
     if (now >= s_next_poll) {
         s_next_poll = now + STOCK_POLL_S;
         /* A locally managed (NVS) list is never overridden by the remote. */
