@@ -46,7 +46,7 @@ description: >-
 ## 4b. WireGuard 配置放哪里
 1. **板端密钥与端点**：`esp32/devices/sdkconfig.wg.local`（gitignore，勿提交）。编译时并入 `SDKCONFIG_DEFAULTS` / 合并进 `build-…/sdkconfig`。字段：`CONFIG_MUSE_WG_*`（私钥、对端公钥、`10.0.0.2`、endpoint/port、DNS 等）。
 2. **固件逻辑**：`esp32/main/muse_wg.c`（Wi‑Fi GOT_IP → SNTP → `esp_wireguard`）；`wifi_mgr.c` 回调上下线。补丁：`/workspace/muse-185b-wireguard.patch`（不含私钥）。
-3. **VPS 对端**：内核/服务端 WG，地址常为 `10.0.0.1`。**板端 endpoint 端口用 `51820`**（999.2.3+，避开家宽对高位 UDP 回程丢包）；VPS 仍监听 **33535**（手机客户端），并用 `iptables REDIRECT udp/51820→33535`。勿删 33535、勿重启/乱动 x-ui、勿抢 udp/443。OTA/TTS 仅绑 WG 地址。
+3. **VPS 对端**：内核/服务端 WG，地址常为 `10.0.0.1`。**板端 endpoint 端口用 `51820`**（999.2.4+，避开家宽对高位 UDP 回程丢包）；VPS 仍监听 **33535**（手机客户端），并用 `iptables REDIRECT udp/51820→33535`。勿删 33535、勿重启/乱动 x-ui、勿抢 udp/443。OTA/TTS 仅绑 WG 地址。
 
 ## 5. 熄屏与连接保活
 1. 默认电池场景：熄屏后再闲置一段时间，固件会 **wifi nap** 关 Wi‑Fi 省电 → WG/Muse 断，解锁要重连。

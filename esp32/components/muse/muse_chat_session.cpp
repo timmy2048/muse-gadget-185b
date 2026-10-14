@@ -1220,9 +1220,9 @@ static void post_chat(const char *text)
 }
 
 /* A typed turn: the text goes straight to the chat. */
-static void text_begin(const char *text)
+static void text_begin(const char *text, uint32_t gen)
 {
-    if (!turn_start(0, true)) {
+    if (!turn_start(gen, true)) {
         return;
     }
     ESP_LOGI(TAG, "typed turn: %u bytes", (unsigned)strlen(text));
@@ -2130,7 +2130,7 @@ static void handle(const cmd_t &cmd)
         if (s_turn.phase != P_IDLE && !s_turn.text) {
             muse_hatch_console("error", "BUSY WITH A VOICE TURN", nullptr);
         } else {
-            text_begin(cmd.text);
+            text_begin(cmd.text, cmd.gen);
         }
         free(cmd.text);
         break;
@@ -2335,7 +2335,11 @@ extern "C" void muse_hatch_set_resting(bool resting)
 
 extern "C" void muse_hatch_text_turn(char *text)
 {
-    cmd_t cmd{ CMD_TEXT, 0, text };
+    /* Tag the turn with a fresh generation: the voice task only takes events
+     * and reply audio of the current one, so gen 0 left it stuck on SENDING. */
+    uint32_t gen = ++s_gen;
+    drain_out();
+    cmd_t cmd{ CMD_TEXT, gen, text };
     if (!s_cmds || !muse_hatch_configured()) {
         muse_hatch_console("error", "MUSE NOT SET UP", nullptr);
         free(text);
