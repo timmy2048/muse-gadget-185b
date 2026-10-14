@@ -169,7 +169,7 @@ static muse_hatch_vm_t s_vm;       /* cached per-VM credentials */
 static bool s_vm_direct;           /* s_vm.vm_token is the device token itself */
 static char s_host[MUSE_HOST_MAX + 1];
 /* When to connect without a turn asking: once Wi-Fi is up, again with backoff
- * if that fails or the connection drops, not after an idle close. */
+ * if that fails, the connection drops, or an idle close released the socket. */
 static int64_t s_auto_next_us;
 static int64_t s_auto_backoff_us = AUTO_RETRY_MIN_US;
 
@@ -2150,9 +2150,17 @@ static void hatch_task(void *arg)
     for (;;) {
         cmd_t cmd;
         /* Resting, the socket's keepalive (PING_US) needs no quicker polls.
-         * Resting unconnected, Wi-Fi may nap (muse_wifi_nap): wait for a
-         * turn or for waking (CMD_WAKE) instead of watching it. */
-        int wait_ms = !s_connected ? (s_resting ? -1 : 200) : s_turn.phase != P_IDLE ? 2 : s_resting ? 500 : 20;
+         * Resting unconnected with Wi-Fi down: modem may nap — block until
+         * CMD_WAKE. If Wi-Fi is still up, keep a short poll so auto-reconnect
+         * can bring Muse back (previously -1 left Muse offline until wake). */
+        int wait_ms;
+        if (!s_connected) {
+            wait_ms = (s_resting && !muse_wifi_connected()) ? -1 : 200;
+        } else if (s_turn.phase != P_IDLE) {
+            wait_ms = 2;
+        } else {
+            wait_ms = s_resting ? 500 : 20;
+        }
         TickType_t wait = wait_ms < 0 ? portMAX_DELAY : pdMS_TO_TICKS(wait_ms);
         if (xQueueReceive(s_cmds, &cmd, wait) == pdTRUE) {
             handle(cmd);
@@ -2207,9 +2215,13 @@ static void hatch_task(void *arg)
         if (t - s_conn.last_rx_us > DEAD_US) {
             drop_connection("server went quiet");
         } else if (s_turn.phase == P_IDLE && t - s_conn.last_use_us > IDLE_CLOSE_US) {
+            /* Still want Muse online: drop the idle socket then reconnect on
+             * the normal auto-retry path (was INT64_MAX → stayed offline until
+             * the next turn). */
             disconnect("idle");
             muse_hatch_report(MUSE_HATCH_UNTESTED, "");
-            s_auto_next_us = INT64_MAX;   /* the next turn connects */
+            s_auto_next_us = now_us() + AUTO_RETRY_MIN_US;
+            s_auto_backoff_us = AUTO_RETRY_MIN_US;
         } else if (t - s_conn.last_ping_us > PING_US) {
             s_conn.last_ping_us = t;
             if (!ws_send_ping(s_conn.tls)) {
@@ -2328,8 +2340,17 @@ extern "C" void muse_hatch_turn_cancel(void)
 
 extern "C" void muse_hatch_set_resting(bool resting)
 {
-    if (s_resting.exchange(resting) && !resting) {
+    bool was = s_resting.exchange(resting);
+    if (was && !resting) {
         post(CMD_WAKE, 0);
+    } else if (!was && resting) {
+        /* Screen-off / battery rest: if Muse already dropped, retry soon while
+         * Wi-Fi is still up instead of waiting for the next user turn. */
+        if (!s_connected) {
+            s_auto_next_us = 0;
+            s_auto_backoff_us = AUTO_RETRY_MIN_US;
+            post(CMD_WAKE, 0);
+        }
     }
 }
 

@@ -119,6 +119,10 @@ static lv_obj_t *s_upd_bar, *s_upd_pct;
 static muse_ota_check_state_t s_upd_shown = (muse_ota_check_state_t)-1;
 static bool s_upd_applying;
 static int s_upd_last_pct = -1;
+/* OTA task must not touch LVGL: stash result for tick_update (LVGL task). */
+static volatile bool s_upd_done_pending;
+static muse_ota_apply_result_t s_upd_done_result;
+static char s_upd_done_detail[96];
 
 /* Text entry page. */
 static lv_obj_t *s_text_title, *s_text_ta;
@@ -1283,7 +1287,27 @@ static void tick_battery(void)
 
 static void on_ota_apply_done(const muse_ota_apply_event_t *ev, void *user)
 {
+    /* Called from the ota FreeRTOS task — never touch LVGL here (that was the
+     * "confirm upgrade flashes/reboots" crash). muse_state_* is lock-safe. */
     (void)user;
+    if (ev && ev->result == MUSE_OTA_APPLIED) {
+        muse_state_set_caption("OTA OK, rebooting");
+    } else if (ev && ev->result == MUSE_OTA_SKIPPED) {
+        muse_state_set_caption("OTA skipped");
+    } else {
+        muse_state_set_caption("OTA failed");
+    }
+    s_upd_done_result = ev ? ev->result : MUSE_OTA_FAILED;
+    if (ev && ev->detail) {
+        strlcpy(s_upd_done_detail, ev->detail, sizeof(s_upd_done_detail));
+    } else {
+        s_upd_done_detail[0] = '\0';
+    }
+    s_upd_done_pending = true;
+}
+
+static void apply_ota_done_ui(void)
+{
     s_upd_applying = false;
     s_upd_last_pct = -1;
     muse_state_set_progress(0);
@@ -1293,25 +1317,21 @@ static void on_ota_apply_done(const muse_ota_apply_event_t *ev, void *user)
     if (s_upd_pct) {
         lv_obj_add_flag(s_upd_pct, LV_OBJ_FLAG_HIDDEN);
     }
-    if (!ev) {
-        return;
-    }
-    if (ev->result == MUSE_OTA_APPLIED) {
+    if (s_upd_done_result == MUSE_OTA_APPLIED) {
         if (s_upd_status) {
             set_text_cjk(s_upd_status, "升级成功，正在重启…");
         }
-        muse_state_set_caption("OTA OK, rebooting");
-    } else if (ev->result == MUSE_OTA_SKIPPED) {
+    } else if (s_upd_done_result == MUSE_OTA_SKIPPED) {
         if (s_upd_status) {
             set_text_cjk(s_upd_status, "已跳过（版本未更新）");
         }
     } else {
         char buf[128];
-        snprintf(buf, sizeof(buf), "升级失败：%.80s", ev->detail ? ev->detail : "?");
+        snprintf(buf, sizeof(buf), "升级失败：%.80s",
+                 s_upd_done_detail[0] ? s_upd_done_detail : "?");
         if (s_upd_status) {
             set_text_cjk(s_upd_status, buf);
         }
-        muse_state_set_caption("OTA failed");
     }
     s_upd_shown = (muse_ota_check_state_t)-1;
 }
@@ -1402,10 +1422,17 @@ static void build_update_page(lv_obj_t *tile)
     lv_obj_add_flag(s_upd_confirm_btn, LV_OBJ_FLAG_HIDDEN);
     s_upd_shown = (muse_ota_check_state_t)-1;
     s_upd_applying = false;
+    s_upd_done_pending = false;
+    s_upd_done_detail[0] = '\0';
 }
 
 static void tick_update(void)
 {
+    if (s_upd_done_pending) {
+        s_upd_done_pending = false;
+        apply_ota_done_ui();
+        return;
+    }
     if (s_upd_applying) {
         int pct = muse_ota_progress_percent();
         if (pct < 0) {
