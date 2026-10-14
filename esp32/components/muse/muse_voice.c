@@ -38,6 +38,8 @@
 #include "muse_state.h"
 #include "muse_wifi.h"
 #include "muse_stt.h"
+#include "muse_translate.h"
+#include "muse_ui.h"
 
 static const char *TAG = "muse_voice";
 
@@ -250,6 +252,9 @@ static void take(rec_stats_t *st, const int16_t *pcm)
 static bool record(bool barge_in, size_t *held, char *why, size_t cap)
 {
     muse_state_set_mode(MUSE_MODE_LISTENING);
+    if (muse_ui_page_is_translate()) {
+        muse_translate_on_listen();
+    }
     muse_state_set_progress(0);
     s_rec_n = s_sent = 0;
     s_live = s_tried = false;
@@ -990,6 +995,14 @@ static void voice_task(void *arg)
             continue;
         }
 #if CONFIG_MUSE_STT_HTTP && CONFIG_MUSE_HATCH
+        /* Translate page: STT → translate → TTS, do not talk to Muse. */
+        if (muse_ui_page_is_translate()) {
+            muse_translate_submit_pcm(s_rec, s_rec_n);
+            drop_rec();
+            pre_reset();
+            go_idle("");
+            continue;
+        }
         if (try_azure_stt_turn()) {
             pre_reset();
             if (muse_state_mode(NULL) != MUSE_MODE_IDLE) {

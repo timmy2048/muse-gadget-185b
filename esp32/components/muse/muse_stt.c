@@ -5,6 +5,7 @@
 
 #if CONFIG_MUSE_STT_HTTP
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -86,7 +87,8 @@ static uint8_t *make_wav(const int16_t *pcm, size_t frames, size_t *out_len)
     return wav;
 }
 
-char *muse_stt_recognize_pcm(const int16_t *pcm, size_t frames)
+
+static char *recognize_url(const int16_t *pcm, size_t frames, const char *url, char *lang_out, size_t lang_cap)
 {
     if (!pcm || frames < MUSE_AUDIO_RATE / 5) {   /* <0.2s useless */
         return NULL;
@@ -100,7 +102,7 @@ char *muse_stt_recognize_pcm(const int16_t *pcm, size_t frames)
 
     resp_t resp = { 0 };
     esp_http_client_config_t cfg = {
-        .url = CONFIG_MUSE_STT_URL,
+        .url = url,
         .method = HTTP_METHOD_POST,
         .timeout_ms = 25000,
         .buffer_size = 2048,
@@ -119,7 +121,7 @@ char *muse_stt_recognize_pcm(const int16_t *pcm, size_t frames)
     esp_http_client_set_header(c, "User-Agent", "muse-gadget-stt");
     esp_http_client_set_post_field(c, (const char *)wav, (int)wav_len);
 
-    ESP_LOGI(TAG, "POST %s (%u bytes, %.2fs)", CONFIG_MUSE_STT_URL, (unsigned)wav_len,
+    ESP_LOGI(TAG, "POST %s (%u bytes, %.2fs)", url, (unsigned)wav_len,
              (double)frames / MUSE_AUDIO_RATE);
     esp_err_t err = esp_http_client_perform(c);
     int status = esp_http_client_get_status_code(c);
@@ -139,15 +141,57 @@ char *muse_stt_recognize_pcm(const int16_t *pcm, size_t frames)
     }
     const cJSON *ok = cJSON_GetObjectItem(root, "ok");
     const cJSON *text = cJSON_GetObjectItem(root, "text");
+    const cJSON *language = cJSON_GetObjectItem(root, "language");
+    const cJSON *detected = cJSON_GetObjectItem(root, "detected");
     char *out = NULL;
     if (cJSON_IsTrue(ok) && cJSON_IsString(text) && text->valuestring && text->valuestring[0]) {
         out = strdup(text->valuestring);
         ESP_LOGI(TAG, "recognized: %s", out);
+        if (lang_out && lang_cap) {
+            lang_out[0] = '\0';
+            const char *lang = NULL;
+            if (cJSON_IsString(detected) && detected->valuestring && detected->valuestring[0]) {
+                lang = detected->valuestring;
+            } else if (cJSON_IsString(language) && language->valuestring) {
+                lang = language->valuestring;
+            }
+            if (lang) {
+                if (lang[0] == 'z' || lang[0] == 'Z') {
+                    snprintf(lang_out, lang_cap, "zh");
+                } else if (lang[0] == 'e' || lang[0] == 'E') {
+                    snprintf(lang_out, lang_cap, "en");
+                } else {
+                    snprintf(lang_out, lang_cap, "%s", lang);
+                }
+            }
+        }
     } else {
         ESP_LOGW(TAG, "stt empty/fail: %.*s", (int)resp.len, resp.buf);
     }
     cJSON_Delete(root);
     return out;
+}
+
+char *muse_stt_recognize_pcm(const int16_t *pcm, size_t frames)
+{
+    return recognize_url(pcm, frames, CONFIG_MUSE_STT_URL, NULL, 0);
+}
+
+char *muse_stt_recognize_pcm_auto(const int16_t *pcm, size_t frames, char *lang_out, size_t lang_cap)
+{
+    char url[256];
+    /* Append ?lang=auto or &lang=auto */
+    if (strchr(CONFIG_MUSE_STT_URL, '?')) {
+        snprintf(url, sizeof(url), "%s&lang=auto", CONFIG_MUSE_STT_URL);
+    } else {
+        snprintf(url, sizeof(url), "%s?lang=auto", CONFIG_MUSE_STT_URL);
+    }
+    char *out = recognize_url(pcm, frames, url, lang_out, lang_cap);
+    if (out) {
+        return out;
+    }
+    /* Older VPS without auto: fall back to default STT. */
+    return recognize_url(pcm, frames, CONFIG_MUSE_STT_URL, lang_out, lang_cap);
 }
 
 #endif /* CONFIG_MUSE_STT_HTTP */

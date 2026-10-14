@@ -41,6 +41,10 @@ void muse_ui_show_settings(void);
 void muse_ui_show_stocks(void);
 /* Slide to the todos tile. */
 void muse_ui_show_todos(void);
+/* Slide to the translate tile. */
+void muse_ui_show_translate(void);
+/* True when the active swipe page is translate. */
+bool muse_ui_page_is_translate(void);
 /* Settings sub-pages turn off the tile swipe so they can use horizontal gestures. */
 void muse_ui_set_swipe_enabled(bool enabled);
 /* Temporarily applies a brightness while a slider is dragged. */
