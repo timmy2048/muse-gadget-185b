@@ -44,6 +44,7 @@
 #include "muse_state.h"
 #include "muse_text.h"
 #include "muse_stock.h"
+#include "muse_todo.h"
 #include "muse_wifi.h"
 #if CONFIG_MUSE_WATCHER_CAMERA
 #include "boards/watcher_camera.h"
@@ -95,7 +96,8 @@ static lv_obj_t *s_tv;
 static lv_obj_t *s_face;
 static lv_obj_t *s_settings;
 static lv_obj_t *s_stocks;
-static lv_obj_t *s_dots[3];
+static lv_obj_t *s_todos;
+static lv_obj_t *s_dots[4];
 static lv_obj_t *s_wifi_icon;
 static lv_obj_t *s_ble_icon;
 static lv_obj_t *s_cover;
@@ -863,9 +865,13 @@ static void build_screen(void)
         lv_obj_set_style_bg_opa(s_face, LV_OPA_COVER, 0);
         s_settings = lv_tileview_add_tile(s_tv, 1, 0, LV_DIR_LEFT | LV_DIR_RIGHT);
         /* Stocks watchlist: one more swipe left from settings. */
-        s_stocks = lv_tileview_add_tile(s_tv, 2, 0, LV_DIR_LEFT);
+        s_stocks = lv_tileview_add_tile(s_tv, 2, 0, LV_DIR_LEFT | LV_DIR_RIGHT);
         lv_obj_set_scrollbar_mode(s_stocks, LV_SCROLLBAR_MODE_OFF);
         muse_stock_build(s_stocks, s_w, s_h);
+        /* Todos: swipe left from stocks. */
+        s_todos = lv_tileview_add_tile(s_tv, 3, 0, LV_DIR_RIGHT);
+        lv_obj_set_scrollbar_mode(s_todos, LV_SCROLLBAR_MODE_OFF);
+        muse_todo_build(s_todos, s_w, s_h);
         face = s_face;
     }
 
@@ -1102,7 +1108,7 @@ static void update_control_hints(muse_mode_t mode)
     if (!s_ptt_hint) return;
     /* Don't obscure settings/stocks rows with floating physical icons. */
     lv_obj_t *active = s_tv ? lv_tileview_get_tile_active(s_tv) : NULL;
-    bool settings = active == s_settings || active == s_stocks;
+    bool settings = active == s_settings || active == s_stocks || active == s_todos;
     lv_obj_set_flag(s_ptt_hint, LV_OBJ_FLAG_HIDDEN, settings);
     lv_obj_set_flag(s_spk_hint, LV_OBJ_FLAG_HIDDEN, settings);
     lv_obj_set_flag(s_pwr_hint, LV_OBJ_FLAG_HIDDEN, settings);
@@ -1123,8 +1129,8 @@ static void build_overlays(void)
 {
     lv_obj_t *scr = lv_screen_active();
 
-    /* Page dots. */
-    for (int i = 0; i < 3 && s_tv; i++) {
+    /* Page dots (face / settings / stocks / todos). */
+    for (int i = 0; i < 4 && s_tv; i++) {
         lv_obj_t *d = lv_obj_create(scr);
         lv_obj_remove_style_all(d);
         lv_obj_set_size(d, 8, 8);
@@ -1132,7 +1138,7 @@ static void build_overlays(void)
         lv_obj_set_style_bg_opa(d, LV_OPA_COVER, 0);
         lv_obj_set_style_bg_color(d, lv_color_hex(COLOR_DOT_OFF), 0);
         lv_obj_remove_flag(d, LV_OBJ_FLAG_CLICKABLE);
-        lv_obj_align(d, LV_ALIGN_BOTTOM_MID, (i - 1) * 16, -14);
+        lv_obj_align(d, LV_ALIGN_BOTTOM_MID, (i - 1) * 14 - 7, -14);
         s_dots[i] = d;
     }
 
@@ -1288,7 +1294,9 @@ static void update_chrome(float now)
 
     if (s_tv) {
         lv_obj_t *active = lv_tileview_get_tile_active(s_tv);
-        int page = active == s_settings ? 1 : active == s_stocks ? 2 : 0;
+        int page = active == s_settings ? 1
+                  : active == s_stocks ? 2
+                  : active == s_todos ? 3 : 0;
         bool subpage = muse_settings_ui_in_subpage();
         bool swipe = !page || !subpage;
         if (swipe != lv_obj_has_flag(s_tv, LV_OBJ_FLAG_SCROLLABLE)) {
@@ -1296,14 +1304,15 @@ static void update_chrome(float now)
         }
         int shown = page * 2 + subpage;
         if (shown != s_shown_page) {
-            for (int i = 0; i < 3; i++) {
+            for (int i = 0; i < 4; i++) {
                 lv_obj_set_style_bg_color(s_dots[i], lv_color_hex(i == page ? COLOR_ACCENT : COLOR_DOT_OFF), 0);
-                lv_obj_set_flag(s_dots[i], LV_OBJ_FLAG_HIDDEN, page && subpage);
+                lv_obj_set_flag(s_dots[i], LV_OBJ_FLAG_HIDDEN, page == 1 && subpage);
             }
             s_shown_page = shown;
         }
         muse_settings_ui_tick(lv_obj_get_scroll_x(s_tv) > 0);
         muse_stock_tick(now);
+        muse_todo_tick(now);
     }
 
     /* Joining, the icon blinks: the compact layout has no state label. */
@@ -1734,6 +1743,16 @@ void muse_ui_show_stocks(void)
     }
     lv_obj_add_flag(s_tv, LV_OBJ_FLAG_SCROLLABLE);
     lv_tileview_set_tile(s_tv, s_stocks, LV_ANIM_OFF);
+}
+
+/* Slide to the todos tile. */
+void muse_ui_show_todos(void)
+{
+    if (!s_tv || !s_todos) {
+        return;
+    }
+    lv_obj_add_flag(s_tv, LV_OBJ_FLAG_SCROLLABLE);
+    lv_tileview_set_tile(s_tv, s_todos, LV_ANIM_OFF);
 }
 
 void muse_ui_set_swipe_enabled(bool enabled)

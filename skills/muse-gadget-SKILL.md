@@ -46,7 +46,7 @@ description: >-
 ## 4b. WireGuard 配置放哪里
 1. **板端密钥与端点**：`esp32/devices/sdkconfig.wg.local`（gitignore，勿提交）。编译时并入 `SDKCONFIG_DEFAULTS` / 合并进 `build-…/sdkconfig`。字段：`CONFIG_MUSE_WG_*`（私钥、对端公钥、`10.0.0.2`、endpoint/port、DNS 等）。
 2. **固件逻辑**：`esp32/main/muse_wg.c`（Wi‑Fi GOT_IP → SNTP → `esp_wireguard`）；`wifi_mgr.c` 回调上下线。补丁：`/workspace/muse-185b-wireguard.patch`（不含私钥）。
-3. **VPS 对端**：内核/服务端 WG，地址常为 `10.0.0.1`，监听与 endpoint 端口一致（如 33535）。OTA/TTS 仅绑 WG 地址。改 TTS/OTA **勿动 x-ui**。
+3. **VPS 对端**：内核/服务端 WG，地址常为 `10.0.0.1`，监听与 endpoint 端口一致（现网 **51820**；旧笔记可能写 33535）。OTA/TTS 仅绑 WG 地址。改 TTS/OTA **勿动 x-ui**。
 
 ## 5. 熄屏与连接保活
 1. 默认电池场景：熄屏后再闲置一段时间，固件会 **wifi nap** 关 Wi‑Fi 省电 → WG/Muse 断，解锁要重连。
@@ -89,6 +89,13 @@ description: >-
 - [ ] 设置→检查更新 能拉到 GitHub latest.json（WG up，HTTPS）；升级时有进度条
 - [ ] 主页键盘图标能打开打字；全键拼音/九键 T9 可切换；候选随输入刷新；发完回主页看回复
 - [ ] 改 TTS/OTA 后手机 VLESS 等仍正常
+
+
+## 11. Chat-driven Todos（999.2.6+）
+1. **UI**：主页继续左滑 → Settings → Stocks → **TODO**（圆屏深色+紫强调，对齐 mock）。
+2. **同步**：跟 Muse 说「提醒我明天 10 点开会」等；Muse 回复里带 `<<<MUSE_TODO{"op":"add","title":"…","due":unix}>>>` 板子会解析并写入 NVS（namespace `todo` / key `list`，不碰其它 NVS）。也可用 `link.invoke` → **`device.todo`**（op=add|complete|remove|clear|replace）。另可轮询仓库根 `todos.json`（与 watchlist 同模式；本地 NVS 优先）。
+3. **提醒**：NTP 对时后，到点弹窗 + **蜂鸣（chirp）+ TTS**（本 SKU 无振动马达）。点「完成」或「稍后」（+10 分钟）。
+4. **发版**：抬 `esp32/version.txt` → 编译（`sdkconfig.wg.local` + `sdkconfig.token.local` + `dev_signing_key.pem`）→ `ota/publish_github.sh`。WG 端口保持 **UDP 51820**。
 
 ## 9. 排障速查
 | 现象 | 优先查 |

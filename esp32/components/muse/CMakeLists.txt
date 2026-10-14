@@ -30,6 +30,7 @@ if(CONFIG_MUSE_ENABLED)
         "muse_battery.c"
         "muse_ui.c"
         "muse_stock.c"
+        "muse_todo.c"
         "muse_audio.c"
         "muse_pmu.c"
         "muse_input.c"

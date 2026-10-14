@@ -77,6 +77,7 @@
 #endif
 #if CONFIG_MUSE_ENABLED
 #include "muse_glue.h"
+#include "muse_todo.h"
 // Muse joins Wi-Fi from its own settings, before or without pairing.
 #define WIFI_WITHOUT_PAIRING 1
 #else
@@ -1941,6 +1942,30 @@ static cJSON *on_ws_command(
     }
 #endif
 
+#if CONFIG_MUSE_ENABLED
+    if (strcmp(command, "device.todo") == 0) {
+        if (!params) {
+            return command_error("invalid_params", "device.todo requires params");
+        }
+        char *raw = cJSON_PrintUnformatted(params);
+        if (!raw) {
+            return command_error("out_of_memory", "failed to print todo params");
+        }
+        muse_todo_cmd_t cmd;
+        int prc = muse_todo_parse_cmd(raw, &cmd);
+        free(raw);
+        if (prc != 0) {
+            return command_error("invalid_params", "device.todo params not a valid todo command");
+        }
+        if (muse_todo_apply_cmd(&cmd) != 0) {
+            return command_error("apply_failed", "todo command could not be applied");
+        }
+        cJSON *result = cJSON_CreateObject();
+        cJSON_AddBoolToObject(result, "ok", true);
+        cJSON_AddNumberToObject(result, "count", muse_todo_count());
+        return result;
+    }
+#endif
     char msg[128];
     snprintf(msg, sizeof(msg), "unsupported command: %s", command);
     return command_error("unsupported", msg);

@@ -1430,6 +1430,34 @@ static char *build_register_json(void) {
                     "(esp_https_ota), then reboot.",
                     ota_required, ota_optional);
     }
+#if CONFIG_MUSE_ENABLED
+    {
+        cJSON *todo_required = cJSON_CreateObject();
+        cJSON *op_param = cJSON_CreateObject();
+        cJSON_AddStringToObject(op_param, "type", "string");
+        cJSON_AddStringToObject(op_param, "description",
+            "Todo op: add | complete | remove | clear | replace. "
+            "Chat can also embed <<<MUSE_TODO{...}>>> markers.");
+        cJSON_AddItemToObject(todo_required, "op", op_param);
+        cJSON *todo_optional = cJSON_CreateObject();
+        for (const char *k : {"id", "title"}) {
+            cJSON *p = cJSON_CreateObject();
+            cJSON_AddStringToObject(p, "type", "string");
+            cJSON_AddItemToObject(todo_optional, k, p);
+        }
+        cJSON *due_p = cJSON_CreateObject();
+        cJSON_AddStringToObject(due_p, "type", "integer");
+        cJSON_AddStringToObject(due_p, "description", "Unix epoch seconds due time.");
+        cJSON_AddItemToObject(todo_optional, "due", due_p);
+        cJSON *items_p = cJSON_CreateObject();
+        cJSON_AddStringToObject(items_p, "type", "array");
+        cJSON_AddStringToObject(items_p, "description", "Full list for replace op.");
+        cJSON_AddItemToObject(todo_optional, "items", items_p);
+        add_command(commands, "device.todo",
+                    "Add/complete/remove/clear/replace chat-driven todos on the gadget.",
+                    todo_required, todo_optional);
+    }
+#endif
 
     cJSON_AddItemToObject(params, "commands_v2", commands);
     cJSON_AddItemToObject(root, "params", params);
